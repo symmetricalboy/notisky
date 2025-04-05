@@ -3,96 +3,30 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Notisky Authentication Callback</title>
+    <title>Notisky Authentication</title>
+    <!-- You can link your main style.css if you want consistent styling -->
     <link rel="stylesheet" href="./style.css"> 
     <style>
-        body { display: flex; justify-content: center; align-items: center; min-height: 80vh; text-align: center; }
-        .status-box { padding: 2rem; background-color: #fff; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        .error { color: #dc3545; }
-        .success { color: #28a745; }
+        /* Simple centered styling */
+        body { display: flex; justify-content: center; align-items: center; min-height: 80vh; text-align: center; font-family: sans-serif; background-color: #f8f9fa; }
+        .status-box { padding: 2rem; background-color: #fff; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); color: #333; }
+        h1 { color: #0070ff; margin-bottom: 1rem; }
     </style>
 </head>
 <body>
     <div class="status-box">
-        <h1 id="status-title">Processing Authentication...</h1>
-        <p id="status-message">Please wait while we complete the login process.</p>
-        <noscript>JavaScript is required for this page to function.</noscript>
+        <h1>Authenticating...</h1>
+        <p>Please wait. You will be redirected shortly.</p>
+        <p><em>You can close this window if it doesn't close automatically.</em></p>
+        <!-- No complex script needed here -->
     </div>
-
     <script>
-        const statusTitle = document.getElementById('status-title');
-        const statusMessage = document.getElementById('status-message');
-        const statusBox = document.querySelector('.status-box');
-
-        function displayStatus(title, message, isError = false) {
-            if (statusTitle) statusTitle.textContent = title;
-            if (statusMessage) statusMessage.textContent = message;
-            if (statusBox) {
-                statusBox.classList.toggle('error', isError);
-                statusBox.classList.toggle('success', !isError);
-            }
-            console[isError ? 'error' : 'log'](`${title} - ${message}`);
-        }
-
-        try {
-            // Check if browser.runtime is available (indicates running as part of extension context - unlikely here)
-            if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.sendMessage) {
-                 if (typeof browser === "undefined" || !browser.runtime || !browser.runtime.sendMessage) {
-                    throw new Error('Extension context (chrome.runtime or browser.runtime) not available.');
-                 }
-            }
-            
-            const hash = window.location.hash.substring(1); // Remove leading #
-            const params = new URLSearchParams(hash);
-            const code = params.get('code');
-            const state = params.get('state'); // State from the initial request
-            const error = params.get('error');
-            const errorDescription = params.get('error_description');
-
-            if (error) {
-                displayStatus(
-                    'Authentication Failed', 
-                    `Error: ${error} - ${errorDescription || 'Please try logging in again.'}`, 
-                    true
-                );
-            } else if (code) {
-                displayStatus('Authentication Successful', 'Sending code to extension...');
-                
-                // Use chrome.runtime for Chrome/Edge, browser.runtime for Firefox
-                const runtime = (typeof chrome !== 'undefined' && chrome.runtime) ? chrome.runtime : browser.runtime;
-
-                runtime.sendMessage(
-                    // No extension ID needed when sending from page *to* own extension
-                    {
-                        type: 'OAUTH_CODE_RECEIVED', // New message type for background script
-                        data: { code, state } // Send code and state back
-                    },
-                    (response) => {
-                        if (runtime.lastError) {
-                            displayStatus(
-                                'Communication Error', 
-                                `Could not send code to the extension: ${runtime.lastError.message}. Please ensure the extension is installed and enabled.`, 
-                                true
-                            );
-                        } else if (response && response.success) {
-                            displayStatus('Success!', 'Authentication details sent to the extension. You can close this window.');
-                            // Optionally attempt to close window, but might be blocked by browser
-                            // setTimeout(() => window.close(), 2000); 
-                        } else {
-                            displayStatus(
-                                'Extension Error', 
-                                `The extension reported an error: ${response?.error || 'Unknown error'}. Please check the extension popup.`, 
-                                true
-                            );
-                        }
-                    }
-                );
-            } else {
-                displayStatus('Invalid Callback', 'No authorization code found in the URL.', true);
-            }
-        } catch (err) {
-            displayStatus('Error', `An unexpected error occurred: ${err.message}. Is the extension installed?`, true);
-        }
+      // Optional: You could attempt a window.close() after a delay, 
+      // but it's often blocked by browsers.
+      // setTimeout(() => { 
+      //   window.close(); 
+      // }, 3000); 
+      // It's better to rely on the extension popup closing itself after success.
     </script>
 </body>
 </html> 

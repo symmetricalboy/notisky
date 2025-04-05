@@ -31,24 +31,16 @@ jobs:
       - name: Install dependencies
         run: npm ci
       
-      - name: Build extension
+      - name: Build extension and website
         run: npm run build
       
       - name: Setup Pages
         uses: actions/configure-pages@v4
       
-      - name: Copy client metadata and landing page
-        run: |
-          mkdir -p ./.output/pages
-          cp -r ./docs/* ./.output/pages/
-          mkdir -p ./.output/pages/client-metadata
-          cp ./public/client-metadata/client.json ./.output/pages/client-metadata/
-          cp -r ./public/icon ./.output/pages/icon
-          
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: './.output/pages'
+          path: './.output/public'
           
   deploy:
     environment:

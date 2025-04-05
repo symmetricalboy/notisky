@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import './App.css';
+import Login from '../login/Login';
 
 interface Account {
   did: string;
@@ -9,8 +10,6 @@ interface Account {
 function App() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [loading, setLoading] = useState(true);
-  const [handle, setHandle] = useState('');
-  const [loginError, setLoginError] = useState('');
 
   useEffect(() => {
     // Fetch accounts when popup opens
@@ -26,31 +25,6 @@ function App() {
         setLoading(false);
       });
   }, []);
-
-  const handleLoginClick = () => {
-    // Validate handle
-    if (!handle) {
-      setLoginError('Please enter your Bluesky handle');
-      return;
-    }
-    
-    setLoginError('');
-    
-    // Initiate the OAuth login flow with the handle
-    browser.runtime.sendMessage({ 
-      type: 'INITIATE_LOGIN',
-      data: { handle }
-    })
-    .then(response => {
-      if (!response.success) {
-        setLoginError(response.error || 'Login failed');
-      }
-    })
-    .catch(error => {
-      console.error('Failed to initiate login:', error);
-      setLoginError('Failed to connect to Bluesky');
-    });
-  };
 
   const handleRemoveAccount = (did: string) => {
     browser.runtime.sendMessage({ 
@@ -88,23 +62,9 @@ function App() {
               </li>
             ))}
           </ul>
-          <button onClick={handleLoginClick}>Add Another Account</button>
         </div>
       ) : (
-        <div className="login">
-          <p>Sign in with your Bluesky account to get started</p>
-          <div className="login-form">
-            <input
-              type="text"
-              placeholder="your.handle.bsky.social"
-              value={handle}
-              onChange={(e) => setHandle(e.target.value)}
-              className="handle-input"
-            />
-            {loginError && <div className="error-message">{loginError}</div>}
-            <button onClick={handleLoginClick}>Login with Bluesky</button>
-          </div>
-        </div>
+        <Login />
       )}
       
       <footer>

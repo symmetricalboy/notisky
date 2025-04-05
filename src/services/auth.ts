@@ -1,117 +1,32 @@
-import { BskyAgent } from '@atproto/api';
+import BskyAgent from '@atproto/api';
+import { Account } from './auth'; // Self-import is okay for type definition
 
 export interface Account {
   did: string;
   handle: string;
   email?: string;
-  refreshJwt: string;
-  accessJwt: string;
+  refreshJwt: string; // Must be stored securely
+  accessJwt: string;  // Must be stored securely
 }
 
 const BLUESKY_SERVICE = 'https://bsky.social';
+const TOKEN_ENDPOINT = `${BLUESKY_SERVICE}/oauth/token`;
+
+// Client ID for token refresh - Using the extension ID might be required by some PDS
+// Or maybe a specific client ID if registered. Using extension ID as a placeholder.
+// NOTE: This needs clarification based on ATProto OAuth spec for refresh grants.
+// For now, assume no client_id needed or use a placeholder/extension ID.
+// const CLIENT_ID_FOR_REFRESH = browser.runtime.id; // Example
 
 /**
- * Creates the OAuth URL for Bluesky authentication
- */
-export async function createOAuthUrl(): Promise<string> {
-  // Generate a random state to verify the callback
-  const state = Math.random().toString(36).substring(2, 15);
-  
-  // Store the state in local storage to verify later
-  await browser.storage.local.set({ oauthState: state });
-  
-  // Get the redirect URL from the extension
-  const redirectUri = browser.identity.getRedirectURL();
-  
-  // Create the OAuth URL
-  const params = new URLSearchParams({
-    response_type: 'code',
-    client_id: browser.runtime.id,
-    redirect_uri: redirectUri,
-    scope: 'com.atproto.notification:read',
-    state
-  });
-  
-  return `${BLUESKY_SERVICE}/oauth/authorize?${params.toString()}`;
-}
-
-/**
- * Handles the OAuth callback and exchanges the code for tokens
- */
-export async function handleOAuthCallback(url: string): Promise<Account | null> {
-  try {
-    const urlObj = new URL(url);
-    const params = new URLSearchParams(urlObj.search);
-    
-    const code = params.get('code');
-    const state = params.get('state');
-    
-    // Verify state
-    const { oauthState } = await browser.storage.local.get('oauthState');
-    if (!code || state !== oauthState) {
-      throw new Error('Invalid OAuth callback');
-    }
-    
-    // Clear the state
-    await browser.storage.local.remove('oauthState');
-    
-    // Exchange the code for tokens
-    const redirectUri = browser.identity.getRedirectURL();
-    const tokenResponse = await fetch(`${BLUESKY_SERVICE}/oauth/token`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded'
-      },
-      body: new URLSearchParams({
-        grant_type: 'authorization_code',
-        code: code,
-        client_id: browser.runtime.id,
-        redirect_uri: redirectUri
-      }).toString()
-    });
-    
-    if (!tokenResponse.ok) {
-      const errorData = await tokenResponse.json();
-      throw new Error(`Token exchange failed: ${errorData.error || 'Unknown error'}`);
-    }
-    
-    const tokens = await tokenResponse.json();
-    
-    // Use the tokens to create a session
-    const agent = new BskyAgent({ service: BLUESKY_SERVICE });
-    await agent.resumeSession({
-      refreshJwt: tokens.refresh_token,
-      accessJwt: tokens.access_token
-    });
-    
-    // Get user info
-    const { data: profile } = await agent.getProfile({ actor: agent.session?.did! });
-    
-    const account: Account = {
-      did: agent.session?.did!,
-      handle: profile.handle,
-      refreshJwt: tokens.refresh_token,
-      accessJwt: tokens.access_token,
-      email: profile.email
-    };
-    
-    // Save the account
-    await saveAccount(account);
-    
-    return account;
-  } catch (error) {
-    console.error('OAuth error:', error);
-    return null;
-  }
-}
-
-/**
- * Refreshes an account's access token
+ * Refreshes an account's access token using the refresh token.
+ * This function should be called by the background script when an API call fails due to an expired token.
  */
 export async function refreshToken(account: Account): Promise<Account | null> {
+  console.log(`Attempting to refresh token for ${account.handle} (${account.did})`);
   try {
     // Use the refresh token to get a new access token
-    const tokenResponse = await fetch(`${BLUESKY_SERVICE}/oauth/token`, {
+    const response = await fetch(TOKEN_ENDPOINT, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded'
@@ -119,38 +34,47 @@ export async function refreshToken(account: Account): Promise<Account | null> {
       body: new URLSearchParams({
         grant_type: 'refresh_token',
         refresh_token: account.refreshJwt,
-        client_id: browser.runtime.id
+        // client_id: CLIENT_ID_FOR_REFRESH // Include if required by the OAuth server
       }).toString()
     });
-    
-    if (!tokenResponse.ok) {
-      const errorData = await tokenResponse.json();
-      throw new Error(`Token refresh failed: ${errorData.error || 'Unknown error'}`);
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ error: 'Unknown refresh error', description: response.statusText }));
+      console.error(`Token refresh failed (${response.status}) for ${account.did}:`, errorData);
+      // If refresh fails (e.g., invalid grant), the refresh token might be revoked.
+      // Consider removing the account or marking it as needing re-login.
+      if (response.status === 400 || response.status === 401) {
+        console.warn(`Refresh token likely revoked for ${account.did}. Removing account.`);
+        await removeAccount(account.did); // Remove account on fatal refresh error
+        return null; // Indicate failure and removal
+      }
+      throw new Error(`Token refresh failed: ${errorData.error || 'Unknown error'} - ${errorData.description || 'No description'}`);
     }
-    
-    const tokens = await tokenResponse.json();
-    
-    // Create an agent with the new tokens
-    const agent = new BskyAgent({ service: BLUESKY_SERVICE });
-    await agent.resumeSession({
-      refreshJwt: tokens.refresh_token,
-      accessJwt: tokens.access_token
-    });
-    
+
+    const tokens = await response.json();
+
+    // Validate new tokens
+    if (!tokens.access_token || !tokens.refresh_token) {
+        console.error('Token refresh response missing required tokens for', account.did, tokens);
+        throw new Error('Invalid token response received from refresh endpoint');
+    }
+
     // Update the account with the new tokens
     const updatedAccount: Account = {
       ...account,
-      refreshJwt: tokens.refresh_token,
-      accessJwt: tokens.access_token
+      accessJwt: tokens.access_token,
+      refreshJwt: tokens.refresh_token // Update refresh token if a new one is issued
     };
-    
-    // Save the updated account
+
+    console.log(`Token refreshed successfully for ${account.did}`);
+
+    // Save the updated account with new tokens
     await saveAccount(updatedAccount);
-    
+
     return updatedAccount;
   } catch (error) {
-    console.error('Error refreshing token', error);
-    return null;
+    console.error('Error during token refresh process for', account.did, error);
+    return null; // Indicate failure
   }
 }
 
@@ -158,28 +82,52 @@ export async function refreshToken(account: Account): Promise<Account | null> {
  * Saves an account to storage
  */
 export async function saveAccount(account: Account): Promise<void> {
-  const { accounts = {} } = await browser.storage.local.get('accounts');
-  
-  accounts[account.did] = account;
-  
-  await browser.storage.local.set({ accounts });
+  try {
+    const { accounts = {} } = await browser.storage.local.get('accounts');
+    // Basic validation before saving
+    if (!account || !account.did || !account.handle || !account.accessJwt || !account.refreshJwt) {
+      console.error('Attempted to save invalid account structure:', account);
+      return; // Do not save invalid account
+    }
+    accounts[account.did] = account;
+    await browser.storage.local.set({ accounts });
+    console.log(`Account saved/updated for ${account.did}`);
+  } catch (error) {
+    console.error('Error saving account', account.did, error);
+  }
 }
 
 /**
  * Loads all saved accounts from storage
  */
 export async function loadAccounts(): Promise<Record<string, Account>> {
-  const { accounts = {} } = await browser.storage.local.get('accounts');
-  return accounts;
+  try {
+    const { accounts = {} } = await browser.storage.local.get('accounts');
+    // Optional: Add validation here to filter out malformed accounts during load
+    console.log('Accounts loaded from storage:', Object.keys(accounts));
+    return accounts;
+  } catch (error) {
+    console.error('Error loading accounts', error);
+    return {}; // Return empty object on error
+  }
 }
 
 /**
  * Removes an account from storage
  */
 export async function removeAccount(did: string): Promise<void> {
-  const { accounts = {} } = await browser.storage.local.get('accounts');
-  
-  delete accounts[did];
-  
-  await browser.storage.local.set({ accounts });
-} 
+  try {
+    const { accounts = {} } = await browser.storage.local.get('accounts');
+    if (accounts[did]) {
+      delete accounts[did];
+      await browser.storage.local.set({ accounts });
+      console.log(`Account removed for ${did}`);
+    } else {
+      console.warn(`Attempted to remove non-existent account: ${did}`);
+    }
+  } catch (error) {
+    console.error('Error removing account', did, error);
+  }
+}
+
+// REMOVED createOAuthUrl and handleOAuthCallback as they belong in UI context 

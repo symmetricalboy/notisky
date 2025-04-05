@@ -1,5 +1,5 @@
 import BskyAgent from '@atproto/api';
-import { Account, loadAccounts, saveAccount, refreshToken, removeAccount } from '../src/services/auth';
+import { Account, loadAccounts, saveAccount, refreshToken, removeAccount, tokenResponseToAccount } from '../src/services/auth';
 import { 
   startNotificationPolling, 
   stopNotificationPolling, 
@@ -12,8 +12,13 @@ let activeAgents: Record<string, BskyAgent> = {};
 // Store polling intervals
 const pollingIntervals: Record<string, number> = {};
 
-// Temporary storage for OAuth code and state (alternative to storage.local for simplicity)
-let oauthCodeInfo: { code: string; state?: string | null, receivedAt: number } | null = null;
+// Import constants needed for token exchange
+import { BLUESKY_SERVICE } from '../src/services/atproto-oauth';
+const TOKEN_ENDPOINT = `${BLUESKY_SERVICE}/oauth/token`;
+// Need Client ID and Web Callback URL for token exchange
+// TODO: Share these constants properly between background and popup
+const WEB_CALLBACK_URL = 'https://notisky.symm.app/oauth-callback.html';
+const CLIENT_ID = 'https://notisky.symm.app/public/client-metadata/client.json';
 
 // Function to attempt resuming session or refreshing token for an account
 async function activateAccountSession(account: Account): Promise<BskyAgent | null> {
@@ -133,35 +138,63 @@ export default defineBackground({
         return false; 
       }
 
-      if (message.type === 'OAUTH_CODE_RECEIVED') {
-        const { code, state } = message.data || {};
-        if (code) {
-          console.log(`Received OAuth code (state: ${state}). Storing temporarily.`);
-          // Store code and state temporarily (valid for short time)
-          oauthCodeInfo = { code, state, receivedAt: Date.now() };
-          // Respond success to the callback page
-          sendResponse({ success: true });
-          // We don't exchange the token here; the popup will ask for the code
-        } else {
-          console.error('OAUTH_CODE_RECEIVED message missing code.');
-          sendResponse({ success: false, error: 'No code provided in message.' });
+      if (message.type === 'EXCHANGE_OAUTH_CODE') {
+        const { code, state, codeVerifier } = message.data || {};
+        if (!code || !codeVerifier) {
+          console.error('EXCHANGE_OAUTH_CODE message missing code or verifier.');
+          sendResponse({ success: false, error: 'Missing code or verifier.' });
+          return false; // Synchronous response needed
         }
-        return false; // Indicate synchronous response
-      }
 
-      if (message.type === 'GET_OAUTH_CODE') {
-        console.log('Popup requested stored OAuth code.');
-        // Check if code exists and is recent (e.g., within last 5 minutes)
-        if (oauthCodeInfo && (Date.now() - oauthCodeInfo.receivedAt < 5 * 60 * 1000)) {
-          console.log('Returning stored OAuth code info to popup.');
-          sendResponse({ success: true, data: { code: oauthCodeInfo.code, state: oauthCodeInfo.state } });
-          // Clear the code once retrieved to prevent reuse
-          oauthCodeInfo = null;
-        } else {
-          console.warn('No valid/recent OAuth code found for popup request.');
-          sendResponse({ success: false, error: 'No valid code available. Please login again.' });
-        }
-        return false; // Indicate synchronous response
+        console.log(`Exchanging OAuth code (state: ${state}) for tokens...`);
+        
+        // Perform the token exchange fetch call
+        fetch(TOKEN_ENDPOINT, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            grant_type: 'authorization_code',
+            code: code,
+            redirect_uri: WEB_CALLBACK_URL,
+            client_id: CLIENT_ID, 
+            code_verifier: codeVerifier
+          }).toString()
+        })
+        .then(response => response.json().then(tokenData => ({ ok: response.ok, status: response.status, tokenData })))
+        .then(async ({ ok, status, tokenData }) => {
+          if (!ok) {
+            console.error(`Token exchange failed (${status}):`, tokenData);
+            throw new Error(tokenData.error_description || tokenData.error || 'Token exchange failed');
+          }
+
+          console.log('Token exchange successful');
+          const account = await tokenResponseToAccount(tokenData); 
+          
+          if (account) {
+            console.log(`Account created from token exchange: ${account.handle}`);
+            await saveAccount(account); // Save the new account
+            const agent = await activateAccountSession(account); // Activate session
+            if (agent) {
+                activeAgents[account.did] = agent;
+                startPollingForAccount(account, agent); 
+                updateNotificationBadge(); 
+                console.log('New account session activated and polling started.');
+                sendResponse({ success: true }); // Report success back to popup
+            } else {
+                console.error(`Failed to activate session for account ${account.did} after token exchange.`);
+                sendResponse({ success: false, error: 'Failed to activate session after login.' });
+            }
+          } else {
+            console.error('Failed to process token data after exchange.');
+            sendResponse({ success: false, error: 'Failed to process token data.' });
+          }
+        })
+        .catch(err => {
+          console.error('Error during token exchange process:', err);
+          sendResponse({ success: false, error: `Token exchange failed: ${err.message}` });
+        });
+
+        return true; // Indicate ASYNCHRONOUS response 
       }
 
       if (message.type === 'ACCOUNT_ADDED') {

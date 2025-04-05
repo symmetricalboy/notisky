@@ -130,4 +130,51 @@ export async function removeAccount(did: string): Promise<void> {
   }
 }
 
+/**
+ * Converts raw token data (from token endpoint response) into an Account object.
+ * Fetches profile data to get the handle.
+ */
+export async function tokenResponseToAccount(tokenData: any): Promise<Account | null> {
+  try {
+    if (!tokenData || !tokenData.did || !tokenData.access_token || !tokenData.refresh_token) { 
+      console.error('tokenResponseToAccount: Invalid token data structure:', tokenData);
+      return null;
+    }
+    console.log(`tokenResponseToAccount: Processing tokens for DID: ${tokenData.did}`);
+    
+    // Use a temporary agent to get the profile handle
+    const agent = new BskyAgent({ service: BLUESKY_SERVICE });
+    // Resume session using the *newly obtained* tokens and the DID from the token response
+    await agent.resumeSession({
+        did: tokenData.did,
+        accessJwt: tokenData.access_token, // Use the NEW access token
+        refreshJwt: tokenData.refresh_token, // Use the NEW refresh token
+        handle: 'temp.bsky.social' // Placeholder needed for resumeSession
+    });
+
+     if (!agent.session?.did) {
+        console.error('tokenResponseToAccount: BskyAgent did not initialize correctly after token exchange.');
+        return null; 
+    }
+    
+    // Fetch profile using the now authenticated agent
+    const { data: profile } = await agent.getProfile({ actor: agent.session.did });
+
+    // Create the final Account object
+    const account: Account = {
+      did: agent.session.did, 
+      handle: profile.handle, // Get handle from profile 
+      refreshJwt: tokenData.refresh_token, // Store the tokens from the response
+      accessJwt: tokenData.access_token,  
+      email: profile.email // Optional email from profile
+    };
+    console.log(`tokenResponseToAccount: Account created/updated for handle: ${account.handle}`);
+    return account;
+
+  } catch (error) {
+    console.error('tokenResponseToAccount: Error converting token response:', error);
+    return null;
+  }
+}
+
 // REMOVED createOAuthUrl and handleOAuthCallback as they belong in UI context 

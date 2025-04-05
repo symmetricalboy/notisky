@@ -224,12 +224,9 @@ function Login() {
     setLoading(true);
     
     try {
-        const state = crypto.randomUUID(); // Generate unique state for this request
+        const state = crypto.randomUUID(); 
         console.log('Generated state for OAuth flow:', state);
         
-        // Store state temporarily if needed to verify callback later (optional)
-        // localStorage.setItem('oauth_state', state);
-
         console.log('Creating BrowserOAuthClient...'); 
         const oauthClient = new BrowserOAuthClient({ 
             clientMetadata, 
@@ -237,18 +234,23 @@ function Login() {
             responseMode: 'fragment' 
         });
         
-        console.log('Calling oauthClient.signIn() with state...');
+        console.log('Calling oauthClient.signIn() with state (no await)...');
         // Let the client handle PKCE generation/storage and redirect
-        await oauthClient.signIn(handle.trim(), { state });
+        // Try removing await to see if it prevents the "User navigated back" error
+        oauthClient.signIn(handle.trim(), { state });
         
-        console.log('Redirecting to Bluesky login... (Should not see this log often)'); 
+        // We expect the redirect to happen immediately, so reaching here is unlikely
+        // unless there's an immediate synchronous error before navigation starts.
+        console.log('Called signIn, waiting for redirect...'); 
 
     } catch (err: any) {
-      console.error('OAuth signIn initiation error:', err); 
+      // This catch block might only catch synchronous errors now
+      console.error('OAuth signIn initiation sync error:', err); 
       setError(`Failed to start login: ${err.message || err}`);
       setLoading(false);
       setInfo(null);
     }
+    // Keep loading=true assuming redirect will happen
   };
   
   const handleSubmit = handleOAuthLogin; 

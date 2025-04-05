@@ -50,6 +50,56 @@ async function generateCodeChallenge(verifier: string): Promise<string> {
         .replace(/=/g, '');
 }
 
+// --- Helper Function (Moved back / recreated for UI context) ---
+async function oauthSessionToAccount(session: any): Promise<Account | null> {
+  try {
+    if (!session || typeof session.sub !== 'string' || 
+        typeof session.access_token !== 'string' || typeof session.refresh_token !== 'string') { 
+      console.error('oauthSessionToAccount: Invalid session structure:', session);
+      return null;
+    }
+    console.log(`oauthSessionToAccount: Converting session for DID: ${session.sub}`);
+    const agent = new BskyAgent({ 
+      service: BLUESKY_SERVICE,
+      session: session // Pass the session received from oauthClient.init()
+    });
+    if (!agent.session?.did || agent.session.did !== session.sub) {
+        console.error('oauthSessionToAccount: BskyAgent did not initialize correctly.');
+        // If agent didn't init, try getting profile directly with DID from session
+        try {
+            const fallbackAgent = new BskyAgent({ service: BLUESKY_SERVICE });
+            const { data: profile } = await fallbackAgent.getProfile({ actor: session.sub });
+            const account: Account = {
+              did: session.sub, 
+              handle: profile.handle, 
+              refreshJwt: session.refresh_token, // Use tokens from original session
+              accessJwt: session.access_token,  
+              email: profile.email 
+            };
+            console.warn('Agent init failed, but created Account via fallback profile fetch.');
+            return account;
+        } catch (fallbackError) {
+             console.error('oauthSessionToAccount: Failed to init agent AND fallback profile fetch failed:', fallbackError);
+             return null; 
+        }
+    }
+    // Agent initialized correctly, proceed as normal
+    const { data: profile } = await agent.getProfile({ actor: agent.session.did });
+    const account: Account = {
+      did: agent.session.did, 
+      handle: profile.handle, 
+      refreshJwt: agent.session.refreshJwt!, // Use tokens from potentially refreshed agent session
+      accessJwt: agent.session.accessJwt!,  
+      email: profile.email 
+    };
+    console.log(`oauthSessionToAccount: Account created for handle: ${account.handle}`);
+    return account;
+  } catch (error) {
+    console.error('oauthSessionToAccount: Error converting session:', error);
+    return null;
+  }
+}
+
 // --- Login Component ---
 function Login() {
   const [handle, setHandle] = useState('');

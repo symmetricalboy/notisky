@@ -1,54 +1,60 @@
 import React, { useState, useEffect } from 'react';
 import { browser } from 'wxt/browser';
-// BrowserOAuthClient might not be needed anymore, but keep type for metadata
-import { type ClientMetadata } from '@atproto/oauth-client-browser'; 
+import { BrowserOAuthClient, type ClientMetadata } from '@atproto/oauth-client-browser';
 import BskyAgent from '@atproto/api'; // Linter ignored
 import { Account } from '../../src/services/auth'; 
 import { BLUESKY_SERVICE } from '../../src/services/atproto-oauth';
 
 // --- OAuth Configuration ---
-const WEB_CALLBACK_URL = 'https://notisky.symm.app/public/oauth-callback.html';
-const CLIENT_METADATA_URL = 'https://notisky.symm.app/public/client-metadata/client.json';
-const AUTHORIZATION_ENDPOINT = `${BLUESKY_SERVICE}/oauth/authorize`; // Need auth endpoint
 
-// Client Metadata (matching hosted file)
+// Fallback Redirect URI (Only used if browser.identity fails)
+const FALLBACK_REDIRECT_URI = 'https://notisky.symm.app/redirect.html'; // Or maybe a specific error page?
+
+// Safely get redirect URL (Using browser identity API)
+const getRedirectURL = (): string => {
+  try {
+    if (browser.identity && typeof browser.identity.getRedirectURL === 'function') {
+      const url = browser.identity.getRedirectURL();
+      // Basic validation: Should start with https:// and contain the extension ID pattern
+      if (url && url.startsWith('https://') && url.includes('.chromiumapp.org')) { // Adjust domain for other browsers if needed
+        console.log('Login UI: Using redirect URL from browser.identity:', url);
+        return url;
+      }
+      console.warn('Login UI: browser.identity.getRedirectURL() returned invalid value:', url, 'Using fallback.');
+    } else {
+        console.warn('Login UI: browser.identity.getRedirectURL is not available. Using fallback.');
+    }
+  } catch (error) {
+    console.warn('Login UI: Error getting redirect URL from browser.identity, using fallback:', error);
+  }
+  console.log('Login UI: Using fallback redirect URL:', FALLBACK_REDIRECT_URI);
+  return FALLBACK_REDIRECT_URI;
+};
+
+const EXTENSION_REDIRECT_URL = getRedirectURL(); // Get the actual extension redirect URL
+const CLIENT_METADATA_URL = 'https://notisky.symm.app/public/client-metadata/client.json'; // Hosted metadata URL
+
+// Client Metadata (Embedded in the client)
 const clientMetadata: ClientMetadata = {
-  client_id: CLIENT_METADATA_URL, 
+  // Point client_id to the hosted metadata URL (Bluesky server needs to fetch this)
+  client_id: CLIENT_METADATA_URL as any, 
   client_name: 'Notisky', 
-  client_uri: 'https://notisky.symm.app', 
-  redirect_uris: [WEB_CALLBACK_URL], 
+  client_uri: 'https://notisky.symm.app' as any, 
+  // IMPORTANT: Use the extension's actual redirect URI here
+  redirect_uris: [EXTENSION_REDIRECT_URL] as any, 
   logo_uri: 'https://notisky.symm.app/icon/128.png',
   tos_uri: 'https://notisky.symm.app/terms',
   policy_uri: 'https://notisky.symm.app/privacy',
   contacts: ['notisky@symm.app'], 
   token_endpoint_auth_method: 'none', 
   grant_types: ['authorization_code', 'refresh_token'], 
-  response_types: ['code'], // We request code
+  response_types: ['code'], 
   scope: 'atproto transition:generic transition:chat.bsky', 
   application_type: 'web', 
   dpop_bound_access_tokens: true 
 };
 
 // REMOVED tokenResponseToAccount helper (moved to auth.ts)
-
-// PKCE Helper functions (needed for launchWebAuthFlow)
-async function generateCodeVerifier(): Promise<string> {
-    const randomBytes = crypto.getRandomValues(new Uint8Array(32));
-    return btoa(String.fromCharCode(...randomBytes))
-        .replace(/\+/g, '-')
-        .replace(/\//g, '_')
-        .replace(/=/g, '');
-}
-
-async function generateCodeChallenge(verifier: string): Promise<string> {
-    const encoder = new TextEncoder();
-    const data = encoder.encode(verifier);
-    const digest = await crypto.subtle.digest('SHA-256', data);
-    return btoa(String.fromCharCode(...new Uint8Array(digest)))
-        .replace(/\+/g, '-')
-        .replace(/\//g, '_')
-        .replace(/=/g, '');
-}
 
 // --- Helper Function (Moved back / recreated for UI context) ---
 async function oauthSessionToAccount(session: any): Promise<Account | null> {
@@ -61,18 +67,17 @@ async function oauthSessionToAccount(session: any): Promise<Account | null> {
     console.log(`oauthSessionToAccount: Converting session for DID: ${session.sub}`);
     const agent = new BskyAgent({ 
       service: BLUESKY_SERVICE,
-      session: session // Pass the session received from oauthClient.init()
+      session: session 
     });
     if (!agent.session?.did || agent.session.did !== session.sub) {
         console.error('oauthSessionToAccount: BskyAgent did not initialize correctly.');
-        // If agent didn't init, try getting profile directly with DID from session
         try {
             const fallbackAgent = new BskyAgent({ service: BLUESKY_SERVICE });
             const { data: profile } = await fallbackAgent.getProfile({ actor: session.sub });
             const account: Account = {
               did: session.sub, 
               handle: profile.handle, 
-              refreshJwt: session.refresh_token, // Use tokens from original session
+              refreshJwt: session.refresh_token, 
               accessJwt: session.access_token,  
               email: profile.email 
             };
@@ -83,12 +88,11 @@ async function oauthSessionToAccount(session: any): Promise<Account | null> {
              return null; 
         }
     }
-    // Agent initialized correctly, proceed as normal
     const { data: profile } = await agent.getProfile({ actor: agent.session.did });
     const account: Account = {
       did: agent.session.did, 
       handle: profile.handle, 
-      refreshJwt: agent.session.refreshJwt!, // Use tokens from potentially refreshed agent session
+      refreshJwt: agent.session.refreshJwt!, 
       accessJwt: agent.session.accessJwt!,  
       email: profile.email 
     };
@@ -100,6 +104,8 @@ async function oauthSessionToAccount(session: any): Promise<Account | null> {
   }
 }
 
+// REMOVED Manual PKCE Helper functions
+
 // --- Login Component ---
 function Login() {
   const [handle, setHandle] = useState('');
@@ -107,120 +113,111 @@ function Login() {
   const [loading, setLoading] = useState(false);
   const [info, setInfo] = useState<string | null>(null);
 
-  // REMOVED useEffect hook for checking code on load
+  // Effect to handle OAuth callback via init() when the component loads/reloads
+  useEffect(() => {
+    const processOAuthCallback = async () => {
+      // Check if the URL hash contains parameters - indicating a redirect back
+      if (window.location.hash.includes('#code=') || window.location.hash.includes('#error=') || window.location.hash.includes('#state=')) {
+        setLoading(true); 
+        setInfo('Processing login callback...');
+        setError(null);
+        console.log('OAuth callback fragment detected. Initializing client...');
+        
+        // Instantiate client to process the callback
+        const oauthClient = new BrowserOAuthClient({ 
+            clientMetadata, 
+            handleResolver: BLUESKY_SERVICE, 
+            responseMode: 'fragment' // Match the mode used
+        });
 
-  // Handle initiating the OAuth sign-in flow using launchWebAuthFlow
+        try {
+          // init() parses the URL fragment, exchanges code, validates state/PKCE
+          const result = await oauthClient.init(); 
+          
+          if (result && result.session) {
+            console.log('Client init successful. Session obtained for:', result.session.sub);
+            const account = await oauthSessionToAccount(result.session);
+            if (account) {
+              console.log('Account created:', account.handle);
+              setInfo(`Welcome ${account.handle}! Finalizing...`);
+              await browser.runtime.sendMessage({
+                  type: 'ACCOUNT_ADDED',
+                  data: { account }
+              });
+              console.log('ACCOUNT_ADDED message sent to background.');
+              setTimeout(() => window.close(), 1500); 
+            } else {
+              setError('Failed to process session data after login.');
+              setInfo(null);
+            }
+          } else {
+             // Handle cases where init() fails or doesn't return a session
+             const hashParams = new URLSearchParams(window.location.hash.substring(1));
+             const errorCode = hashParams.get('error');
+             const errorDesc = hashParams.get('error_description') || 'Unknown error during callback processing.';
+             if (errorCode) {
+                 console.error(`OAuth Error from callback fragment: ${errorCode} - ${errorDesc}`);
+                 setError(`Login failed: ${errorDesc}`);
+             } else {
+                 console.warn('oauthClient.init() did not return a session after callback detection.', result);
+                 setError('Failed to initialize session from callback.');
+             }
+             setInfo(null);
+          }
+        } catch (err: any) {
+          console.error('Error during OAuth init/callback processing:', err);
+          setError(`An error occurred during login processing: ${err.message || err}`);
+          setInfo(null);
+        } finally {
+          setLoading(false);
+          // Clean the URL hash after processing?
+          // window.history.replaceState({}, document.title, window.location.pathname + window.location.search);
+        }
+      } else {
+          console.log('No OAuth callback fragment detected on load.');
+          setInfo(null); // Clear any previous info message
+      }
+    };
+
+    processOAuthCallback();
+  }, []); // Run once on mount/load
+
+  // Handle initiating the OAuth sign-in flow
   const handleOAuthLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    console.log('[launchWebAuthFlow] Started');
+    console.log('handleOAuthLogin started (direct signIn)');
     if (!handle) {
       setError('Please enter your Bluesky handle (e.g., yourname.bsky.social).');
       return;
     }
     setError(null);
-    setInfo('Preparing secure login...');
+    setInfo('Redirecting to Bluesky for login...'); 
     setLoading(true);
-    let generatedState = null; // Keep state for potential cleanup
     
     try {
-        const state = crypto.randomUUID();
-        generatedState = state; // Store for potential cleanup
-        const codeVerifier = await generateCodeVerifier();
-        const codeChallenge = await generateCodeChallenge(codeVerifier);
-        const codeChallengeMethod = 'S256';
-
-        const verifierStorageKey = `oauth_pkce_verifier_${state}`;
-        localStorage.setItem(verifierStorageKey, codeVerifier);
-        console.log('[launchWebAuthFlow] Stored PKCE verifier for state:', state);
-
-        const authParams = new URLSearchParams({
-            response_type: 'code',
-            client_id: clientMetadata.client_id,
-            redirect_uri: WEB_CALLBACK_URL,
-            scope: clientMetadata.scope!,
-            state: state,
-            code_challenge: codeChallenge,
-            code_challenge_method: codeChallengeMethod,
-        });
-        const authorizationUrl = `${AUTHORIZATION_ENDPOINT}?${authParams.toString()}`;
-        console.log('[launchWebAuthFlow] Constructed Auth URL:', authorizationUrl);
-
-        setInfo('Waiting for Bluesky authorization...');
-        console.log('[launchWebAuthFlow] Calling browser.identity.launchWebAuthFlow...'); // <<< Log before call
+        const state = crypto.randomUUID(); // Generate unique state for this request
+        console.log('Generated state for OAuth flow:', state);
         
-        const resultUrl = await browser.identity.launchWebAuthFlow({
-            url: authorizationUrl,
-            interactive: true
+        console.log('Creating BrowserOAuthClient...'); 
+        // Instantiate client with embedded metadata using extension redirect URI
+        const oauthClient = new BrowserOAuthClient({ 
+            clientMetadata, // Contains EXTENSION_REDIRECT_URL
+            handleResolver: BLUESKY_SERVICE, 
+            responseMode: 'fragment' 
         });
-
-        console.log('[launchWebAuthFlow] Call finished. Result URL:', resultUrl); // <<< Log after call
-
-        // --- Process Result URL --- 
-        if (!resultUrl) {
-            // This happens if the user closes the auth window manually
-            console.log('[launchWebAuthFlow] Flow cancelled by user (no result URL).')
-            throw new Error('Authentication flow was cancelled.');
-        }
-
-        const url = new URL(resultUrl);
-        const fragmentParams = new URLSearchParams(url.hash.substring(1));
-        const code = fragmentParams.get('code');
-        const returnedState = fragmentParams.get('state');
-        const errorCode = fragmentParams.get('error');
-        const errorDesc = fragmentParams.get('error_description');
-
-        if (errorCode) {
-             console.error('[launchWebAuthFlow] OAuth Error in callback URL:', errorCode, errorDesc);
-             throw new Error(`OAuth Error: ${errorDesc || errorCode}`);
-        }
-        if (!code) {
-            console.error('[launchWebAuthFlow] Code not found in callback URL fragment:', url.hash);
-            throw new Error('Authorization code not found in callback URL.');
-        }
-        if (returnedState !== state) {
-             localStorage.removeItem(verifierStorageKey); 
-             console.error('[launchWebAuthFlow] State mismatch! Expected:', state, 'Received:', returnedState);
-             throw new Error('OAuth state mismatch. Security check failed.');
-        }
-
-        // --- Retrieve Verifier --- 
-        console.log('[launchWebAuthFlow] State matches. Retrieving verifier...');
-        const storedVerifier = localStorage.getItem(verifierStorageKey);
-        localStorage.removeItem(verifierStorageKey); 
-        if (!storedVerifier) {
-             console.error('[launchWebAuthFlow] Verifier not found in localStorage for key:', verifierStorageKey);
-             throw new Error('PKCE verifier not found after callback. Please try again.');
-        }
-
-        // --- Send to Background --- 
-        setInfo('Authentication approved! Finalizing login...');
-        console.log('[launchWebAuthFlow] Sending code and verifier to background...');
-        const exchangeResponse = await browser.runtime.sendMessage({
-            type: 'EXCHANGE_OAUTH_CODE',
-            data: { code, state: returnedState, codeVerifier: storedVerifier }
-        });
-
-        // --- Handle Background Response --- 
-        console.log('[launchWebAuthFlow] Received response from background:', exchangeResponse);
-        if (exchangeResponse && exchangeResponse.success) {
-            console.log('Background reported successful exchange.');
-            setInfo('Login successful!');
-            setTimeout(() => window.close(), 1500);
-        } else {
-             console.error('[launchWebAuthFlow] Background reported error:', exchangeResponse?.error);
-             throw new Error(exchangeResponse?.error || 'Token exchange failed in background.');
-        }
+        
+        console.log('Calling await oauthClient.signIn() with state...');
+        // Let the client handle PKCE generation/storage and redirect
+        await oauthClient.signIn(handle.trim(), { state });
+        
+        // This part might not be reached unless signIn throws an immediate error
+        console.log('signIn call completed without throwing (redirect expected)...'); 
 
     } catch (err: any) {
-      console.error('[launchWebAuthFlow] Overall flow error:', err); // <<< Log in catch block
-      // Check for specific cancellation errors
-      if (err.message?.includes('cancelled') || err.message?.includes('closed by the user')) {
-           setError('Login cancelled.');
-      } else {
-           setError(`Login failed: ${err.message || 'Unknown error'}`);
-      }
-      // Clean up verifier if state was generated and error occurred
-      if (generatedState) localStorage.removeItem(`oauth_pkce_verifier_${generatedState}`);
+      // Catch immediate errors from signIn (like misconfiguration, network fail before redirect)
+      // The "User navigated back" error might still happen here
+      console.error('OAuth signIn initiation error:', err); 
+      setError(`Failed to start login: ${err.message || err}`);
       setLoading(false);
       setInfo(null);
     }
@@ -262,7 +259,7 @@ function Login() {
       
       <div className="login-footer">
         <p>
-          A new window will open to authorize Notisky with Bluesky.
+           You will be redirected to Bluesky to authorize Notisky.
         </p>
       </div>
     </div>

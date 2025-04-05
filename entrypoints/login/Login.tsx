@@ -112,7 +112,7 @@ function Login() {
   // Handle initiating the OAuth sign-in flow using launchWebAuthFlow
   const handleOAuthLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    console.log('handleOAuthLogin (launchWebAuthFlow) started');
+    console.log('[launchWebAuthFlow] Started');
     if (!handle) {
       setError('Please enter your Bluesky handle (e.g., yourname.bsky.social).');
       return;
@@ -120,20 +120,19 @@ function Login() {
     setError(null);
     setInfo('Preparing secure login...');
     setLoading(true);
+    let generatedState = null; // Keep state for potential cleanup
     
     try {
-        // 1. Generate PKCE and State
         const state = crypto.randomUUID();
+        generatedState = state; // Store for potential cleanup
         const codeVerifier = await generateCodeVerifier();
         const codeChallenge = await generateCodeChallenge(codeVerifier);
         const codeChallengeMethod = 'S256';
 
-        // 2. Store Verifier locally, keyed by state
         const verifierStorageKey = `oauth_pkce_verifier_${state}`;
         localStorage.setItem(verifierStorageKey, codeVerifier);
-        console.log('Stored PKCE verifier for state:', state);
+        console.log('[launchWebAuthFlow] Stored PKCE verifier for state:', state);
 
-        // 3. Construct Authorization URL
         const authParams = new URLSearchParams({
             response_type: 'code',
             client_id: clientMetadata.client_id,
@@ -142,26 +141,27 @@ function Login() {
             state: state,
             code_challenge: codeChallenge,
             code_challenge_method: codeChallengeMethod,
-            // Optional: include handle hint if supported
-            // login_hint: handle.trim(), 
         });
         const authorizationUrl = `${AUTHORIZATION_ENDPOINT}?${authParams.toString()}`;
-        console.log('Constructed Auth URL:', authorizationUrl);
+        console.log('[launchWebAuthFlow] Constructed Auth URL:', authorizationUrl);
 
-        // 4. Launch Web Auth Flow
         setInfo('Waiting for Bluesky authorization...');
+        console.log('[launchWebAuthFlow] Calling browser.identity.launchWebAuthFlow...'); // <<< Log before call
+        
         const resultUrl = await browser.identity.launchWebAuthFlow({
             url: authorizationUrl,
             interactive: true
         });
 
-        // 5. Process Result URL
-        console.log('launchWebAuthFlow completed. Result URL:', resultUrl);
+        console.log('[launchWebAuthFlow] Call finished. Result URL:', resultUrl); // <<< Log after call
+
+        // --- Process Result URL --- 
         if (!resultUrl) {
-            throw new Error('Authentication flow was cancelled or failed.');
+            // This happens if the user closes the auth window manually
+            console.log('[launchWebAuthFlow] Flow cancelled by user (no result URL).')
+            throw new Error('Authentication flow was cancelled.');
         }
 
-        // Parse fragment/query from the result URL (depends on server response mode, but likely fragment)
         const url = new URL(resultUrl);
         const fragmentParams = new URLSearchParams(url.hash.substring(1));
         const code = fragmentParams.get('code');
@@ -170,58 +170,60 @@ function Login() {
         const errorDesc = fragmentParams.get('error_description');
 
         if (errorCode) {
-            throw new Error(`OAuth Error: ${errorDesc || errorCode}`);
+             console.error('[launchWebAuthFlow] OAuth Error in callback URL:', errorCode, errorDesc);
+             throw new Error(`OAuth Error: ${errorDesc || errorCode}`);
         }
-
         if (!code) {
+            console.error('[launchWebAuthFlow] Code not found in callback URL fragment:', url.hash);
             throw new Error('Authorization code not found in callback URL.');
         }
-
         if (returnedState !== state) {
-             // Clean up potentially stale verifier
              localStorage.removeItem(verifierStorageKey); 
+             console.error('[launchWebAuthFlow] State mismatch! Expected:', state, 'Received:', returnedState);
              throw new Error('OAuth state mismatch. Security check failed.');
         }
 
-        // 6. Retrieve Verifier
+        // --- Retrieve Verifier --- 
+        console.log('[launchWebAuthFlow] State matches. Retrieving verifier...');
         const storedVerifier = localStorage.getItem(verifierStorageKey);
-        localStorage.removeItem(verifierStorageKey); // Clean up immediately
+        localStorage.removeItem(verifierStorageKey); 
         if (!storedVerifier) {
+             console.error('[launchWebAuthFlow] Verifier not found in localStorage for key:', verifierStorageKey);
              throw new Error('PKCE verifier not found after callback. Please try again.');
         }
 
-        // 7. Send Code and Verifier to Background for Exchange
+        // --- Send to Background --- 
         setInfo('Authentication approved! Finalizing login...');
-        console.log('Sending code and verifier to background for exchange...');
+        console.log('[launchWebAuthFlow] Sending code and verifier to background...');
         const exchangeResponse = await browser.runtime.sendMessage({
             type: 'EXCHANGE_OAUTH_CODE',
-            data: { 
-                code: code,
-                state: returnedState,
-                codeVerifier: storedVerifier
-             }
+            data: { code, state: returnedState, codeVerifier: storedVerifier }
         });
 
-        // 8. Handle Background Response
+        // --- Handle Background Response --- 
+        console.log('[launchWebAuthFlow] Received response from background:', exchangeResponse);
         if (exchangeResponse && exchangeResponse.success) {
-            console.log('Background script reported successful token exchange and account setup.');
+            console.log('Background reported successful exchange.');
             setInfo('Login successful!');
-            // Close popup after success
             setTimeout(() => window.close(), 1500);
         } else {
-            throw new Error(exchangeResponse?.error || 'Token exchange failed in background.');
+             console.error('[launchWebAuthFlow] Background reported error:', exchangeResponse?.error);
+             throw new Error(exchangeResponse?.error || 'Token exchange failed in background.');
         }
 
     } catch (err: any) {
-      console.error('OAuth flow error:', err); 
-      setError(`Login failed: ${err.message || err}`);
-      // Clean up verifier if state exists and error occurred
-      const potentialState = info?.includes('state:') ? info.split('state:')[1]?.trim() : null;
-      if (potentialState) localStorage.removeItem(`oauth_pkce_verifier_${potentialState}`);
+      console.error('[launchWebAuthFlow] Overall flow error:', err); // <<< Log in catch block
+      // Check for specific cancellation errors
+      if (err.message?.includes('cancelled') || err.message?.includes('closed by the user')) {
+           setError('Login cancelled.');
+      } else {
+           setError(`Login failed: ${err.message || 'Unknown error'}`);
+      }
+      // Clean up verifier if state was generated and error occurred
+      if (generatedState) localStorage.removeItem(`oauth_pkce_verifier_${generatedState}`);
       setLoading(false);
       setInfo(null);
     }
-    // setLoading(false) will happen in finally or after success/error
   };
   
   const handleSubmit = handleOAuthLogin; 

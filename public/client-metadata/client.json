@@ -1,0 +1,17 @@
+{
+  "client_id": "https://notisky.app/client-metadata/client.json",
+  "client_name": "Notisky",
+  "client_uri": "https://notisky.app",
+  "redirect_uris": [],
+  "logo_uri": "https://notisky.app/icon/128.png",
+  "tos_uri": "https://notisky.app/terms",
+  "policy_uri": "https://notisky.app/privacy",
+  "software_id": "notisky",
+  "software_version": "1.0.0",
+  "contacts": ["support@notisky.app"],
+  "description": "Real-time notifications for Bluesky",
+  "token_endpoint_auth_method": "none",
+  "grant_types": ["authorization_code"],
+  "response_types": ["code"],
+  "scope": "com.atproto.notification:read"
+} 

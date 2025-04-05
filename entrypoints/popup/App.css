@@ -1,0 +1,200 @@
+#root {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 2rem;
+  text-align: center;
+}
+
+.logo {
+  height: 6em;
+  padding: 1.5em;
+  will-change: filter;
+  transition: filter 300ms;
+}
+.logo:hover {
+  filter: drop-shadow(0 0 2em #54bc4ae0);
+}
+.logo.react:hover {
+  filter: drop-shadow(0 0 2em #61dafbaa);
+}
+
+@keyframes logo-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  a:nth-of-type(2) .logo {
+    animation: logo-spin infinite 20s linear;
+  }
+}
+
+.card {
+  padding: 2em;
+}
+
+.read-the-docs {
+  color: #888;
+}
+
+.notisky-popup {
+  width: 320px;
+  min-height: 300px;
+  padding: 16px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+  display: flex;
+  flex-direction: column;
+  color: #000;
+}
+
+.notisky-popup header {
+  text-align: center;
+  margin-bottom: 20px;
+}
+
+.notisky-popup h1 {
+  margin: 0;
+  font-size: 24px;
+  color: #0085ff;
+}
+
+.notisky-popup header p {
+  margin: 5px 0 0;
+  font-size: 14px;
+  color: #666;
+}
+
+.loading {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  flex-grow: 1;
+  color: #666;
+}
+
+.login {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex-grow: 1;
+  text-align: center;
+}
+
+.login p {
+  margin-bottom: 16px;
+  color: #555;
+}
+
+.accounts {
+  flex-grow: 1;
+}
+
+.accounts h2 {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 12px;
+  color: #333;
+}
+
+.accounts ul {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 16px;
+}
+
+.accounts li {
+  padding: 8px 12px;
+  background-color: #f5f8ff;
+  border-radius: 6px;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.handle {
+  font-weight: 500;
+}
+
+.remove-btn {
+  background: none;
+  border: none;
+  color: #999;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 50%;
+  width: auto;
+  transition: all 0.2s;
+}
+
+.remove-btn:hover {
+  background-color: #fee;
+  color: #e33;
+}
+
+button {
+  background-color: #0085ff;
+  color: white;
+  border: none;
+  padding: 10px 16px;
+  border-radius: 8px;
+  font-weight: 500;
+  cursor: pointer;
+  font-size: 14px;
+  transition: background-color 0.2s;
+  width: 100%;
+}
+
+button:hover {
+  background-color: #0066cc;
+}
+
+button:active {
+  background-color: #0057b3;
+}
+
+footer {
+  margin-top: 24px;
+  text-align: center;
+  font-size: 12px;
+  color: #888;
+}
+
+footer a {
+  color: #0085ff;
+  text-decoration: none;
+}
+
+footer a:hover {
+  text-decoration: underline;
+}
+
+footer span {
+  margin: 0 6px;
+}
+
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+}
+
+.handle-input {
+  padding: 8px 12px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 14px;
+}
+
+.error-message {
+  color: #e53935;
+  font-size: 12px;
+  margin-top: -8px;
+}

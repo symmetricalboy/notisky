@@ -142,6 +142,7 @@ declare module "wxt/browser" {
     | "/icon/notification/icon-128.png"
     | "/index.html"
     | "/login.html"
+    | "/oauth-redirect-shim.html"
     | "/options.html"
     | "/popup.html"
     | "/style.css"

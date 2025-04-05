@@ -31,17 +31,17 @@ const getRedirectURL = (): string => {
   return FALLBACK_REDIRECT_URI;
 };
 
-const EXTENSION_REDIRECT_URL = getRedirectURL(); // Get the actual extension redirect URL
+const EXTENSION_REDIRECT_URL = getRedirectURL(); // Keep this for init() processing, but don't use in metadata
+const SHIM_REDIRECT_URL = 'https://notisky.symm.app/oauth-redirect-shim.html';
 const CLIENT_METADATA_URL = 'https://notisky.symm.app/public/client-metadata/client.json'; // Hosted metadata URL
 
 // Client Metadata (Embedded in the client)
 const clientMetadata: ClientMetadata = {
-  // Point client_id to the hosted metadata URL (Bluesky server needs to fetch this)
   client_id: CLIENT_METADATA_URL as any, 
   client_name: 'Notisky', 
   client_uri: 'https://notisky.symm.app' as any, 
-  // IMPORTANT: Use the extension's actual redirect URI here
-  redirect_uris: [EXTENSION_REDIRECT_URL] as any, 
+  // IMPORTANT: Use ONLY the shim redirect URI here for the signIn request
+  redirect_uris: [SHIM_REDIRECT_URL] as any, 
   logo_uri: 'https://notisky.symm.app/icon/128.png',
   tos_uri: 'https://notisky.symm.app/terms',
   policy_uri: 'https://notisky.symm.app/privacy',

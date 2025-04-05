@@ -12,6 +12,9 @@ let activeAgents: Record<string, BskyAgent> = {};
 // Store polling intervals
 const pollingIntervals: Record<string, number> = {};
 
+// Temporary storage for OAuth code and state (alternative to storage.local for simplicity)
+let oauthCodeInfo: { code: string; state?: string | null, receivedAt: number } | null = null;
+
 // Function to attempt resuming session or refreshing token for an account
 async function activateAccountSession(account: Account): Promise<BskyAgent | null> {
     console.log(`Activating session for ${account.handle} (${account.did})`);
@@ -122,12 +125,43 @@ export default defineBackground({
 
     // Setup message handlers for communication with popup and content script
     browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
-      console.log('Background received message:', message.type, 'from', sender.url || sender.id);
+      console.log('Background received message:', message.type, 'from', sender.tab?.url || sender.url || sender.id);
       
       if (message.type === 'INITIATE_LOGIN') {
         console.log('INITIATE_LOGIN message received. Acknowledged. UI should handle login flow.');
         sendResponse({ success: true, message: 'Acknowledged. UI initiates login.' });
         return false; 
+      }
+
+      if (message.type === 'OAUTH_CODE_RECEIVED') {
+        const { code, state } = message.data || {};
+        if (code) {
+          console.log(`Received OAuth code (state: ${state}). Storing temporarily.`);
+          // Store code and state temporarily (valid for short time)
+          oauthCodeInfo = { code, state, receivedAt: Date.now() };
+          // Respond success to the callback page
+          sendResponse({ success: true });
+          // We don't exchange the token here; the popup will ask for the code
+        } else {
+          console.error('OAUTH_CODE_RECEIVED message missing code.');
+          sendResponse({ success: false, error: 'No code provided in message.' });
+        }
+        return false; // Indicate synchronous response
+      }
+
+      if (message.type === 'GET_OAUTH_CODE') {
+        console.log('Popup requested stored OAuth code.');
+        // Check if code exists and is recent (e.g., within last 5 minutes)
+        if (oauthCodeInfo && (Date.now() - oauthCodeInfo.receivedAt < 5 * 60 * 1000)) {
+          console.log('Returning stored OAuth code info to popup.');
+          sendResponse({ success: true, data: { code: oauthCodeInfo.code, state: oauthCodeInfo.state } });
+          // Clear the code once retrieved to prevent reuse
+          oauthCodeInfo = null;
+        } else {
+          console.warn('No valid/recent OAuth code found for popup request.');
+          sendResponse({ success: false, error: 'No valid code available. Please login again.' });
+        }
+        return false; // Indicate synchronous response
       }
 
       if (message.type === 'ACCOUNT_ADDED') {
@@ -170,23 +204,23 @@ export default defineBackground({
       }
       
       if (message.type === 'NOTIFICATION_VIEW') {
-        const { did } = message.data || {};
-        console.log(`NOTIFICATION_VIEW received for ${did}`);
-        if (did && activeAgents[did]) {
-          resetNotificationCount(did);
+        const { viewDid } = message.data || {};
+        console.log(`NOTIFICATION_VIEW received for ${viewDid}`);
+        if (viewDid && activeAgents[viewDid]) {
+          resetNotificationCount(viewDid);
           sendResponse({ success: true });
         } else {
-          console.warn(`NOTIFICATION_VIEW: Active agent/account not found for ${did}`);
+          console.warn(`NOTIFICATION_VIEW: Active agent/account not found for ${viewDid}`);
           sendResponse({ success: false, error: 'Active agent/account not found' });
         }
         return false;
       }
       
       if (message.type === 'REMOVE_ACCOUNT') {
-        const { did } = message.data || {};
-        console.log(`REMOVE_ACCOUNT request for ${did}`);
-        if (did) {
-          deactivateAccount(did)
+        const { removeDid } = message.data || {};
+        console.log(`REMOVE_ACCOUNT request for ${removeDid}`);
+        if (removeDid) {
+          deactivateAccount(removeDid)
             .then(() => sendResponse({ success: true }))
             .catch(err => {
                 console.error('Error during account deactivation', err);

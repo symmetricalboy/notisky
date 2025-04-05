@@ -3,99 +3,96 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Notisky - Authentication Successful</title>
-    <link rel="icon" href="./icon/48.png" type="image/png">
+    <title>Notisky Authentication Callback</title>
+    <link rel="stylesheet" href="./style.css"> 
     <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            flex-direction: column;
-            height: 100vh;
-            margin: 0;
-            background-color: #f5f8ff;
-            color: #333;
-            text-align: center;
-        }
-        
-        .success-container {
-            background-color: white;
-            padding: 2rem;
-            border-radius: 8px;
-            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
-            max-width: 500px;
-        }
-        
-        .checkmark {
-            width: 80px;
-            height: 80px;
-            border-radius: 50%;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            background-color: #28a745;
-            margin: 0 auto 1.5rem;
-        }
-        
-        .checkmark svg {
-            width: 40px;
-            height: 40px;
-            fill: white;
-        }
-        
-        h1 {
-            color: #0085ff;
-            margin-bottom: 1rem;
-        }
-        
-        .countdown {
-            font-weight: bold;
-            margin-top: 1rem;
-        }
+        body { display: flex; justify-content: center; align-items: center; min-height: 80vh; text-align: center; }
+        .status-box { padding: 2rem; background-color: #fff; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .error { color: #dc3545; }
+        .success { color: #28a745; }
     </style>
 </head>
 <body>
-    <div class="success-container">
-        <div class="checkmark">
-            <svg viewBox="0 0 24 24">
-                <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z"/>
-            </svg>
-        </div>
-        <h1>Authentication Successful</h1>
-        <p>You have successfully authenticated with Bluesky. You can now close this window and return to the extension.</p>
-        <p class="countdown">This window will close automatically in <span id="timer">5</span> seconds.</p>
+    <div class="status-box">
+        <h1 id="status-title">Processing Authentication...</h1>
+        <p id="status-message">Please wait while we complete the login process.</p>
+        <noscript>JavaScript is required for this page to function.</noscript>
     </div>
-    
+
     <script>
-        // Parse the token from the URL if needed
-        const processTokenFromUrl = () => {
-            // This is just a placeholder. In a real implementation, 
-            // the browser extension would handle this through its background script
-            console.log('OAuth callback received');
-        };
+        const statusTitle = document.getElementById('status-title');
+        const statusMessage = document.getElementById('status-message');
+        const statusBox = document.querySelector('.status-box');
 
-        // Start countdown and auto-close
-        const startCountdown = () => {
-            let seconds = 5;
-            const timerElement = document.getElementById('timer');
+        function displayStatus(title, message, isError = false) {
+            if (statusTitle) statusTitle.textContent = title;
+            if (statusMessage) statusMessage.textContent = message;
+            if (statusBox) {
+                statusBox.classList.toggle('error', isError);
+                statusBox.classList.toggle('success', !isError);
+            }
+            console[isError ? 'error' : 'log'](`${title} - ${message}`);
+        }
+
+        try {
+            // Check if browser.runtime is available (indicates running as part of extension context - unlikely here)
+            if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.sendMessage) {
+                 if (typeof browser === "undefined" || !browser.runtime || !browser.runtime.sendMessage) {
+                    throw new Error('Extension context (chrome.runtime or browser.runtime) not available.');
+                 }
+            }
             
-            const countdown = setInterval(() => {
-                seconds--;
-                timerElement.textContent = seconds;
-                
-                if (seconds <= 0) {
-                    clearInterval(countdown);
-                    window.close();
-                }
-            }, 1000);
-        };
+            const hash = window.location.hash.substring(1); // Remove leading #
+            const params = new URLSearchParams(hash);
+            const code = params.get('code');
+            const state = params.get('state'); // State from the initial request
+            const error = params.get('error');
+            const errorDescription = params.get('error_description');
 
-        // Initialize
-        document.addEventListener('DOMContentLoaded', () => {
-            processTokenFromUrl();
-            startCountdown();
-        });
+            if (error) {
+                displayStatus(
+                    'Authentication Failed', 
+                    `Error: ${error} - ${errorDescription || 'Please try logging in again.'}`, 
+                    true
+                );
+            } else if (code) {
+                displayStatus('Authentication Successful', 'Sending code to extension...');
+                
+                // Use chrome.runtime for Chrome/Edge, browser.runtime for Firefox
+                const runtime = (typeof chrome !== 'undefined' && chrome.runtime) ? chrome.runtime : browser.runtime;
+
+                runtime.sendMessage(
+                    // No extension ID needed when sending from page *to* own extension
+                    {
+                        type: 'OAUTH_CODE_RECEIVED', // New message type for background script
+                        data: { code, state } // Send code and state back
+                    },
+                    (response) => {
+                        if (runtime.lastError) {
+                            displayStatus(
+                                'Communication Error', 
+                                `Could not send code to the extension: ${runtime.lastError.message}. Please ensure the extension is installed and enabled.`, 
+                                true
+                            );
+                        } else if (response && response.success) {
+                            displayStatus('Success!', 'Authentication details sent to the extension. You can close this window.');
+                            // Optionally attempt to close window, but might be blocked by browser
+                            // setTimeout(() => window.close(), 2000); 
+                        } else {
+                            displayStatus(
+                                'Extension Error', 
+                                `The extension reported an error: ${response?.error || 'Unknown error'}. Please check the extension popup.`, 
+                                true
+                            );
+                        }
+                    }
+                );
+            } else {
+                displayStatus('Invalid Callback', 'No authorization code found in the URL.', true);
+            }
+        } catch (err) {
+            displayStatus('Error', `An unexpected error occurred: ${err.message}. Is the extension installed?`, true);
+        }
     </script>
 </body>
 </html> 

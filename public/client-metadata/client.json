@@ -3,7 +3,7 @@
   "client_name": "Notisky Extension",
   "application_type": "web",
   "client_uri": "https://notisky.symm.app",
-  "redirect_uris": ["https://icbkfjcmlbdnikmgbknfpmnnikabpoob.chromiumapp.org/"],
+  "redirect_uris": ["https://notisky.symm.app/oauth-callback.html"],
   "logo_uri": "https://notisky.symm.app/icon/128.png",
   "tos_uri": "https://notisky.symm.app/terms",
   "policy_uri": "https://notisky.symm.app/privacy",

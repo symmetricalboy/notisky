@@ -5,41 +5,22 @@ import BskyAgent from '@atproto/api';
 import { Account } from '../../src/services/auth'; // Adjust path as needed
 import { BLUESKY_SERVICE } from '../../src/services/atproto-oauth'; // Adjust path for constants
 
-// --- OAuth Configuration (Should match background/shared config) ---
+// --- OAuth Configuration ---
+const WEB_CALLBACK_URL = 'https://notisky.symm.app/oauth-callback.html';
+const CLIENT_METADATA_URL = 'https://notisky.symm.app/public/client-metadata/client.json';
+const TOKEN_ENDPOINT = `${BLUESKY_SERVICE}/oauth/token`;
 
-// Fallback Redirect URI
-const FALLBACK_REDIRECT_URI = 'https://notisky.symm.app/redirect.html'; // Replace with your actual deployed callback page if different
-
-// Safely get redirect URL
-const getRedirectURL = (): string => {
-  try {
-    if (browser.identity && typeof browser.identity.getRedirectURL === 'function') {
-      const url = browser.identity.getRedirectURL();
-      if (url && (url.startsWith('https://') || url.startsWith('http://'))) { 
-        console.log('Login UI: Using redirect URL from browser.identity:', url);
-        return url;
-      }
-      console.warn('Login UI: browser.identity.getRedirectURL() returned invalid value:', url, 'Using fallback.');
-    } else {
-        console.warn('Login UI: browser.identity.getRedirectURL is not available. Using fallback.');
-    }
-  } catch (error) {
-    console.warn('Login UI: Error getting redirect URL from browser.identity, using fallback:', error);
-  }
-  console.log('Login UI: Using fallback redirect URL:', FALLBACK_REDIRECT_URI);
-  return FALLBACK_REDIRECT_URI;
-};
-
-// Client Metadata
+// Client Metadata (for frontend instantiation)
 const clientMetadata: ClientMetadata = {
-  client_id: 'https://notisky.symm.app/public/client-metadata/client.json', // <<< UPDATED PATH
-  client_name: 'Notisky', // Use name consistent with client.json (or this one, just be consistent)
-  client_uri: 'https://notisky.symm.app', // Your app's homepage/info URL
-  redirect_uris: [getRedirectURL()], 
-  logo_uri: 'https://notisky.symm.app/icon/128.png', // URL to your app's logo
-  tos_uri: 'https://notisky.symm.app/terms', // URL to Terms of Service
-  policy_uri: 'https://notisky.symm.app/privacy', // URL to Privacy Policy
-  contacts: ['notisky@symm.app'], // Use email consistent with client.json
+  client_id: CLIENT_METADATA_URL, 
+  client_name: 'Notisky', 
+  client_uri: 'https://notisky.symm.app', 
+  // Must match what's in the hosted client.json 
+  redirect_uris: [WEB_CALLBACK_URL], 
+  logo_uri: 'https://notisky.symm.app/icon/128.png',
+  tos_uri: 'https://notisky.symm.app/terms',
+  policy_uri: 'https://notisky.symm.app/privacy',
+  contacts: ['notisky@symm.app'], 
   token_endpoint_auth_method: 'none', 
   grant_types: ['authorization_code', 'refresh_token'], 
   response_types: ['code'], 
@@ -48,38 +29,48 @@ const clientMetadata: ClientMetadata = {
   dpop_bound_access_tokens: true 
 };
 
-// --- Helper Function (Moved/Adapted from atproto-oauth.ts example) ---
-async function oauthSessionToAccount(session: any): Promise<Account | null> {
+// --- Helper Function to convert TOKEN RESPONSE to Account ---
+// Note: This differs from the previous oauthSessionToAccount
+async function tokenResponseToAccount(tokenData: any): Promise<Account | null> {
   try {
-    if (!session || typeof session.sub !== 'string' || 
-        typeof session.access_token !== 'string' || typeof session.refresh_token !== 'string') { 
-      console.error('oauthSessionToAccount: Invalid session structure:', session);
+    // Basic validation of token response
+    if (!tokenData || !tokenData.did || !tokenData.access_token || !tokenData.refresh_token) { 
+      console.error('tokenResponseToAccount: Invalid token data structure:', tokenData);
       return null;
     }
-    console.log(`oauthSessionToAccount: Converting session for DID: ${session.sub}`);
-    const agent = new BskyAgent({ 
-      service: BLUESKY_SERVICE,
-      session: session 
+    console.log(`tokenResponseToAccount: Processing tokens for DID: ${tokenData.did}`);
+    // Use a temporary agent just to get the profile handle
+    // We trust the DID from the token endpoint response
+    const agent = new BskyAgent({ service: BLUESKY_SERVICE });
+    await agent.resumeSession({
+        did: tokenData.did,
+        accessJwt: tokenData.access_token,
+        refreshJwt: tokenData.refresh_token,
+        handle: 'temp.bsky.social' // Needs a placeholder
     });
-    if (!agent.session?.did || agent.session.did !== session.sub) {
-        console.error('oauthSessionToAccount: BskyAgent did not initialize correctly.');
+     if (!agent.session?.did) {
+        console.error('tokenResponseToAccount: BskyAgent did not initialize correctly.');
         return null; 
     }
     const { data: profile } = await agent.getProfile({ actor: agent.session.did });
+
     const account: Account = {
       did: agent.session.did, 
-      handle: profile.handle, 
-      refreshJwt: agent.session.refreshJwt!, 
-      accessJwt: agent.session.accessJwt!,  
+      handle: profile.handle, // Get handle from profile 
+      refreshJwt: tokenData.refresh_token, // Use tokens from the direct response 
+      accessJwt: tokenData.access_token,  
       email: profile.email 
     };
-    console.log(`oauthSessionToAccount: Account created for handle: ${account.handle}`);
+    console.log(`tokenResponseToAccount: Account created for handle: ${account.handle}`);
     return account;
+
   } catch (error) {
-    console.error('oauthSessionToAccount: Error converting session:', error);
+    console.error('tokenResponseToAccount: Error converting token response:', error);
     return null;
   }
 }
+
+// REMOVED Manual PKCE Helper functions
 
 // --- Login Component --- 
 
@@ -90,72 +81,135 @@ function Login() {
   const [loading, setLoading] = useState(false);
   const [info, setInfo] = useState<string | null>(null); // For status updates
 
-  // Effect to handle OAuth callback when the component loads
+  // Effect to check for stored code when popup opens/reloads
   useEffect(() => {
-    const processOAuthCallback = async () => {
-      // Check if the URL contains OAuth response parameters (fragment)
-      if (window.location.hash.includes('#code=') || window.location.hash.includes('#error=')) {
-        setLoading(true); // Show loading indicator during callback processing
-        setInfo('Processing login callback...');
-        setError(null);
-        console.log('OAuth callback detected in URL fragment.');
-        
-        const oauthClient = new BrowserOAuthClient({ 
-            clientMetadata, 
-            handleResolver: BLUESKY_SERVICE, 
-            responseMode: 'fragment' 
-        });
+    const checkForOAuthCode = async () => {
+      console.log('Login component mounted/reloaded, checking for OAuth code...');
+      setLoading(true);
+      setInfo('Checking authentication status...');
+      try {
+        const response = await browser.runtime.sendMessage({ type: 'GET_OAUTH_CODE' });
+        if (response && response.success && response.data?.code) {
+          console.log('OAuth code found, attempting token exchange.', response.data);
+          setInfo('Authentication code received, exchanging for tokens...');
+          setError(null);
 
-        try {
-          const result = await oauthClient.init();
-          if (result && result.session) {
-            console.log('OAuth client initialized successfully with session:', result.session.sub);
-            const account = await oauthSessionToAccount(result.session);
-            if (account) {
-              console.log('Account retrieved from session:', account.handle);
-              setInfo(`Welcome ${account.handle}! Finalizing login...`);
-              await browser.runtime.sendMessage({
-                  type: 'ACCOUNT_ADDED',
-                  data: { account }
-              });
-              console.log('ACCOUNT_ADDED message sent to background.');
-              // Close the popup/login window after successful login and message sent
-              setTimeout(() => window.close(), 1500); // Small delay for user feedback
-            } else {
-              setError('Failed to process session data after login.');
-              setInfo(null);
-            }
-          } else {
-             // Handle cases where init() doesn't return a session (e.g., error in fragment)
-             const hashParams = new URLSearchParams(window.location.hash.substring(1));
-             if (hashParams.has('error')) {
-                 const errorCode = hashParams.get('error');
-                 const errorDesc = hashParams.get('error_description');
-                 console.error(`OAuth Error in callback: ${errorCode} - ${errorDesc}`);
-                 setError(`Login failed: ${errorDesc || errorCode}`);
-                 setInfo(null);
+          const { code, state } = response.data;
+
+          // ** Retrieve the code_verifier stored by BrowserOAuthClient **
+          // The key usually involves the state. Trying a common pattern.
+          // IMPORTANT: Verify this key format by inspecting localStorage after signIn redirect!
+          const verifierKey = `com.atproto.oauth.pkce.code_verifier.${state}`;
+          const codeVerifier = localStorage.getItem(verifierKey);
+
+          if (!codeVerifier) {
+            console.error(`FATAL: PKCE code_verifier not found in localStorage for key: ${verifierKey}`);
+            // Attempt fallback keys?
+            const fallbackKey1 = `pkce_code_verifier_${state}`;
+            const fallbackKey2 = `oauth_pkce_verifier_${state}`;
+            const fallbackVerifier = localStorage.getItem(fallbackKey1) || localStorage.getItem(fallbackKey2);
+             if (!fallbackVerifier) {
+                setError('Security code missing (verifier). Please try logging in again.');
+                setInfo(null);
+                setLoading(false);
+                return;
              } else {
-                 console.warn('oauthClient.init() did not return a session after callback.', result);
-                 setError('Failed to initialize session from callback.');
-                 setInfo(null);
+                console.warn(`Used fallback key to find PKCE verifier: ${fallbackKey1} or ${fallbackKey2}`);
+                localStorage.removeItem(fallbackKey1);
+                localStorage.removeItem(fallbackKey2);
+                // codeVerifier = fallbackVerifier; // Reassign if necessary - logic implies we use fallback directly
+                 // Exchange code for token using fallbackVerifier
+                 const tokenResponse = await fetch(TOKEN_ENDPOINT, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: new URLSearchParams({
+                        grant_type: 'authorization_code',
+                        code: code,
+                        redirect_uri: WEB_CALLBACK_URL,
+                        client_id: clientMetadata.client_id,
+                        code_verifier: fallbackVerifier
+                    }).toString()
+                });
+                 const tokenData = await tokenResponse.json();
+                 if (!tokenResponse.ok) throw new Error(tokenData.error_description || tokenData.error || 'Token exchange failed (fallback verifier)');
+                 // Process tokenData...
+                 const account = await tokenResponseToAccount(tokenData);
+                 if (account) {
+                    setInfo(`Welcome ${account.handle}! Finalizing login...`);
+                    await browser.runtime.sendMessage({ type: 'ACCOUNT_ADDED', data: { account } });
+                    console.log('ACCOUNT_ADDED message sent after token exchange (fallback verifier).');
+                    setTimeout(() => window.close(), 1500);
+                 } else {
+                    setError('Failed to process token data after exchange (fallback verifier).');
+                    setInfo(null);
+                 }
+                 setLoading(false);
+                 return; // Exit after successful fallback processing
              }
           }
-        } catch (err: any) {
-          console.error('Error during OAuth init/callback processing:', err);
-          setError(`An error occurred during login processing: ${err.message || err}`);
-          setInfo(null);
-        } finally {
-          setLoading(false);
-          // Clean the URL hash? 
-          // window.history.replaceState({}, document.title, window.location.pathname + window.location.search);
+          
+          // Found verifier with primary key
+          console.log('Found PKCE verifier using key:', verifierKey);
+          localStorage.removeItem(verifierKey); // Clean up verifier
+
+          // Exchange code for token using primary verifier
+          const tokenResponse = await fetch(TOKEN_ENDPOINT, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({
+              grant_type: 'authorization_code',
+              code: code,
+              redirect_uri: WEB_CALLBACK_URL,
+              client_id: clientMetadata.client_id, 
+              code_verifier: codeVerifier
+            }).toString()
+          });
+
+          const tokenData = await tokenResponse.json();
+
+          if (!tokenResponse.ok) {
+            console.error('Token exchange failed:', tokenData);
+            throw new Error(tokenData.error_description || tokenData.error || 'Token exchange failed');
+          }
+          
+          if (!tokenData.did) {
+                console.warn('Token response did not include DID.');
+          }
+
+          const account = await tokenResponseToAccount(tokenData); 
+
+          if (account) {
+            setInfo(`Welcome ${account.handle}! Finalizing login...`);
+            await browser.runtime.sendMessage({
+                type: 'ACCOUNT_ADDED',
+                data: { account }
+            });
+            console.log('ACCOUNT_ADDED message sent after token exchange.');
+            setTimeout(() => window.close(), 1500);
+          } else {
+            setError('Failed to process token data after exchange.');
+            setInfo(null);
+          }
+
+        } else {
+          // No code found or background script reported error
+          console.log('No pending OAuth code found.');
+          if (response && !response.success) {
+            setError(response.error || 'Failed to retrieve auth code.');
+          }
+          setInfo(null); // Clear any loading messages
         }
-      } else {
-          console.log('No OAuth callback detected in URL fragment.');
+      } catch (err: any) {
+        console.error('Error during OAuth code check/exchange:', err);
+        setError(`Login failed: ${err.message || err}`);
+        setInfo(null);
+      } finally {
+        setLoading(false);
       }
     };
 
-    processOAuthCallback();
-  }, []); // Empty dependency array means this runs once on mount
+    checkForOAuthCode();
+  }, []); 
 
   // Handle initiating the OAuth sign-in flow
   const handleOAuthLogin = async (e: React.FormEvent) => {
@@ -166,33 +220,37 @@ function Login() {
       return;
     }
     setError(null);
-    setInfo('Redirecting to Bluesky for login...');
+    setInfo('Redirecting to Bluesky for login...'); 
     setLoading(true);
     
     try {
-      console.log('Creating BrowserOAuthClient...');
-      const oauthClient = new BrowserOAuthClient({ 
-          clientMetadata, 
-          handleResolver: BLUESKY_SERVICE, 
-          responseMode: 'fragment' 
-      });
-      
-      console.log('Calling oauthClient.signIn()...');
-      // Start the sign-in process - this will redirect the user
-      await oauthClient.signIn(handle.trim());
-      
-      // This part might not be reached due to redirect
-      console.log('Redirecting to Bluesky login... (Should not see this log often)'); 
-      
+        const state = crypto.randomUUID(); // Generate unique state for this request
+        console.log('Generated state for OAuth flow:', state);
+        
+        // Store state temporarily if needed to verify callback later (optional)
+        // localStorage.setItem('oauth_state', state);
+
+        console.log('Creating BrowserOAuthClient...'); 
+        const oauthClient = new BrowserOAuthClient({ 
+            clientMetadata, 
+            handleResolver: BLUESKY_SERVICE, 
+            responseMode: 'fragment' 
+        });
+        
+        console.log('Calling oauthClient.signIn() with state...');
+        // Let the client handle PKCE generation/storage and redirect
+        await oauthClient.signIn(handle.trim(), { state });
+        
+        console.log('Redirecting to Bluesky login... (Should not see this log often)'); 
+
     } catch (err: any) {
-      console.error('OAuth signIn initiation error:', err);
+      console.error('OAuth signIn initiation error:', err); 
       setError(`Failed to start login: ${err.message || err}`);
       setLoading(false);
       setInfo(null);
     }
   };
   
-  // Use handleOAuthLogin for the form submission
   const handleSubmit = handleOAuthLogin; 
 
   return (

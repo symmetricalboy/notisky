@@ -3,7 +3,7 @@
   "client_name": "Notisky",
   "client_uri": "https://notisky.symm.app",
   "redirect_uris": [
-    "https://notisky.symm.app/oauth-redirect-shim.html"
+    "https://notisky.symm.app/public/oauth-redirect-shim.html"
   ],
   "logo_uri": "https://notisky.symm.app/icon/128.png",
   "tos_uri": "https://notisky.symm.app/terms",

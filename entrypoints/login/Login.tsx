@@ -7,7 +7,7 @@ import { Account } from '../../src/services/auth';
 import { BLUESKY_SERVICE } from '../../src/services/atproto-oauth';
 
 // --- OAuth Configuration ---
-const WEB_CALLBACK_URL = 'https://notisky.symm.app/oauth-callback.html';
+const WEB_CALLBACK_URL = 'https://notisky.symm.app/public/oauth-callback.html';
 const CLIENT_METADATA_URL = 'https://notisky.symm.app/public/client-metadata/client.json';
 const AUTHORIZATION_ENDPOINT = `${BLUESKY_SERVICE}/oauth/authorize`; // Need auth endpoint
 

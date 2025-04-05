@@ -1,5 +1,5 @@
 {
-  "client_id": "https://notisky.symm.app/client-metadata/client.json",
+  "client_id": "https://notisky.symm.app/public/client-metadata/client.json",
   "client_name": "Notisky Extension",
   "application_type": "web",
   "client_uri": "https://notisky.symm.app",

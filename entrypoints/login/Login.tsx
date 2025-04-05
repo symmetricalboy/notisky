@@ -32,14 +32,14 @@ const getRedirectURL = (): string => {
 
 // Client Metadata
 const clientMetadata: ClientMetadata = {
-  client_id: 'https://notisky.symm.app/client-metadata/client.json', // YOUR client metadata URL
-  client_name: 'Notisky',
+  client_id: 'https://notisky.symm.app/public/client-metadata/client.json', // <<< UPDATED PATH
+  client_name: 'Notisky', // Use name consistent with client.json (or this one, just be consistent)
   client_uri: 'https://notisky.symm.app', // Your app's homepage/info URL
   redirect_uris: [getRedirectURL()], 
   logo_uri: 'https://notisky.symm.app/icon/128.png', // URL to your app's logo
   tos_uri: 'https://notisky.symm.app/terms', // URL to Terms of Service
   policy_uri: 'https://notisky.symm.app/privacy', // URL to Privacy Policy
-  contacts: ['notisky@symm.app'], 
+  contacts: ['notisky@symm.app'], // Use email consistent with client.json
   token_endpoint_auth_method: 'none', 
   grant_types: ['authorization_code', 'refresh_token'], 
   response_types: ['code'], 

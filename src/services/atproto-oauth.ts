@@ -6,12 +6,29 @@ import { browser } from 'wxt/browser';
 // Constants
 export const BLUESKY_SERVICE = 'https://bsky.social';
 
+// Define a fallback redirect URI
+const FALLBACK_REDIRECT_URI = 'https://notisky.symm.app/redirect.html';
+
+// Safely get redirect URL, with a fallback for build-time and environments
+// where browser.identity might not be available
+const getRedirectURL = () => {
+  try {
+    if (browser.identity && typeof browser.identity.getRedirectURL === 'function') {
+      return browser.identity.getRedirectURL();
+    }
+  } catch (error) {
+    console.warn('Could not get redirect URL from browser.identity, using fallback');
+  }
+  
+  return FALLBACK_REDIRECT_URI;
+};
+
 // Our client metadata
 const clientMetadata = {
   client_id: 'https://notisky.symm.app/client-metadata/client.json',
   client_name: 'Notisky',
   client_uri: 'https://notisky.symm.app',
-  redirect_uris: [browser.identity.getRedirectURL()],
+  redirect_uris: [getRedirectURL()],
   logo_uri: 'https://notisky.symm.app/icon/128.png',
   tos_uri: 'https://notisky.symm.app/terms',
   policy_uri: 'https://notisky.symm.app/privacy',
@@ -22,7 +39,7 @@ const clientMetadata = {
   token_endpoint_auth_method: 'none',
   grant_types: ['authorization_code', 'refresh_token'],
   response_types: ['code'],
-  scope: 'transition:generic',
+  scope: 'atproto transition:generic transition:chat.bsky',
   application_type: 'web',
   dpop_bound_access_tokens: true
 };

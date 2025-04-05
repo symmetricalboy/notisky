@@ -114,96 +114,98 @@ async function initializeAccounts(): Promise<void> {
   }
 }
 
-export default defineBackground(() => {
-  console.log('Notisky background service started', { id: browser.runtime.id });
+export default defineBackground({
+  main() {
+    console.log('Notisky background service started', { id: browser.runtime.id });
 
-  // Initialize notifications permission
-  browser.notifications.getPermissionLevel((level) => {
-    console.log('Notification permission level:', level);
-  });
+    // Initialize notifications permission
+    browser.notifications.getPermissionLevel((level) => {
+      console.log('Notification permission level:', level);
+    });
 
-  // Setup message handlers for communication with popup and content script
-  browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    console.log('Received message', message, 'from', sender);
-    
-    // Handle login initiation
-    if (message.type === 'INITIATE_LOGIN') {
-      const { handle } = message.data || {};
-      if (!handle) {
-        sendResponse({ success: false, error: 'Handle is required' });
+    // Setup message handlers for communication with popup and content script
+    browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
+      console.log('Received message', message, 'from', sender);
+      
+      // Handle login initiation
+      if (message.type === 'INITIATE_LOGIN') {
+        const { handle } = message.data || {};
+        if (!handle) {
+          sendResponse({ success: false, error: 'Handle is required' });
+          return false;
+        }
+        
+        initiateLogin(handle)
+          .then(() => sendResponse({ success: true }))
+          .catch(error => {
+            console.error('Login failed', error);
+            sendResponse({ success: false, error: error.message });
+          });
+        return true; // Indicate async response
+      }
+      
+      // Return accounts list
+      if (message.type === 'GET_ACCOUNTS') {
+        sendResponse({ accounts: Object.values(accounts) });
+        return false; // Synchronous response
+      }
+      
+      // Handle notification view events
+      if (message.type === 'NOTIFICATION_VIEW') {
+        const { did } = message.data || {};
+        if (did && accounts[did]) {
+          resetNotificationCount(did);
+          sendResponse({ success: true });
+        } else {
+          sendResponse({ success: false, error: 'Account not found' });
+        }
         return false;
       }
       
-      initiateLogin(handle)
-        .then(() => sendResponse({ success: true }))
-        .catch(error => {
-          console.error('Login failed', error);
-          sendResponse({ success: false, error: error.message });
-        });
-      return true; // Indicate async response
-    }
-    
-    // Return accounts list
-    if (message.type === 'GET_ACCOUNTS') {
-      sendResponse({ accounts: Object.values(accounts) });
-      return false; // Synchronous response
-    }
-    
-    // Handle notification view events
-    if (message.type === 'NOTIFICATION_VIEW') {
-      const { did } = message.data || {};
-      if (did && accounts[did]) {
-        resetNotificationCount(did);
-        sendResponse({ success: true });
-      } else {
-        sendResponse({ success: false, error: 'Account not found' });
-      }
-      return false;
-    }
-    
-    // Handle account removal
-    if (message.type === 'REMOVE_ACCOUNT') {
-      const { did } = message.data || {};
-      if (did && accounts[did]) {
-        stopPollingForAccount(did);
-        delete accounts[did];
-        sendResponse({ success: true });
-      } else {
-        sendResponse({ success: false, error: 'Account not found' });
-      }
-      return false;
-    }
-    
-    return false;
-  });
-
-  // Setup notification click handler
-  browser.notifications.onClicked.addListener((notificationId) => {
-    // Open Bluesky notifications tab when the desktop notification is clicked
-    browser.tabs.create({ url: 'https://bsky.app/notifications' });
-  });
-
-  // Listen for storage changes to update accounts
-  browser.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName === 'local' && changes.accounts) {
-      const newAccounts = changes.accounts.newValue || {};
-      
-      // Check for new accounts
-      Object.entries(newAccounts).forEach(([did, account]) => {
-        if (!accounts[did]) {
-          // New account added
-          startPollingForAccount(account as Account);
+      // Handle account removal
+      if (message.type === 'REMOVE_ACCOUNT') {
+        const { did } = message.data || {};
+        if (did && accounts[did]) {
+          stopPollingForAccount(did);
+          delete accounts[did];
+          sendResponse({ success: true });
+        } else {
+          sendResponse({ success: false, error: 'Account not found' });
         }
-      });
+        return false;
+      }
       
-      // Update local accounts cache
-      accounts = newAccounts;
-      
-      // Update badge
-      updateNotificationBadge();
-    }
-  });
+      return false;
+    });
 
-  // Initialize accounts when the extension starts
-  initializeAccounts();
+    // Setup notification click handler
+    browser.notifications.onClicked.addListener((notificationId) => {
+      // Open Bluesky notifications tab when the desktop notification is clicked
+      browser.tabs.create({ url: 'https://bsky.app/notifications' });
+    });
+
+    // Listen for storage changes to update accounts
+    browser.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName === 'local' && changes.accounts) {
+        const newAccounts = changes.accounts.newValue || {};
+        
+        // Check for new accounts
+        Object.entries(newAccounts).forEach(([did, account]) => {
+          if (!accounts[did]) {
+            // New account added
+            startPollingForAccount(account as Account);
+          }
+        });
+        
+        // Update local accounts cache
+        accounts = newAccounts;
+        
+        // Update badge
+        updateNotificationBadge();
+      }
+    });
+
+    // Initialize accounts when the extension starts
+    initializeAccounts();
+  }
 });

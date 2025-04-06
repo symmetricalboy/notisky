@@ -62,8 +62,26 @@ export function startNotificationPolling(account: Account, interval = DEFAULT_PO
 /**
  * Stop polling for an account
  */
-export function stopNotificationPolling(intervalId: number): void {
-  window.clearInterval(intervalId);
+export function stopNotificationPolling(did: string, pollingIntervals: Record<string, number>): void {
+  const intervalId = pollingIntervals[did];
+  if (intervalId) {
+    window.clearInterval(intervalId);
+    delete pollingIntervals[did]; // Remove from the record
+    console.log(`Stopped polling for ${did}`);
+  } else {
+    console.warn(`No active polling interval found for ${did} to stop.`);
+  }
+}
+
+/**
+ * Stop polling for ALL accounts
+ */
+export function stopAllPolling(pollingIntervals: Record<string, number>): void {
+  console.log('Stopping polling for all accounts...');
+  Object.keys(pollingIntervals).forEach(did => {
+    stopNotificationPolling(did, pollingIntervals); // Reuse the single-stop function
+  });
+  console.log('Finished stopping all polling.');
 }
 
 /**

@@ -37,11 +37,11 @@ const CLIENT_METADATA_URL = 'https://notisky.symm.app/public/client-metadata/cli
 
 // Client Metadata (Embedded in the client)
 const clientMetadata: ClientMetadata = {
-  client_id: CLIENT_METADATA_URL as any, 
+  client_id: `https://notisky.symm.app/public/client-metadata/client.json` as `https://${string}`, 
   client_name: 'Notisky', 
-  client_uri: 'https://notisky.symm.app' as any, 
+  client_uri: `https://notisky.symm.app` as `https://${string}`, 
   // IMPORTANT: Use ONLY the shim redirect URI here for the signIn request
-  redirect_uris: [SHIM_REDIRECT_URL] as any, 
+  redirect_uris: [`https://notisky.symm.app/public/oauth-redirect-shim.html` as `https://${string}`], 
   logo_uri: 'https://notisky.symm.app/icon/128.png',
   tos_uri: 'https://notisky.symm.app/terms',
   policy_uri: 'https://notisky.symm.app/privacy',

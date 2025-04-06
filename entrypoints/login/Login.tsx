@@ -103,9 +103,9 @@ function Login() {
         console.log('OAuth callback fragment detected. Loading client via load()...');
         
         try {
-          // Load client using the hosted metadata URL
+          // Load client using the hosted metadata URL with explicit literal type cast
           const oauthClient = await BrowserOAuthClient.load({ 
-              clientId: CLIENT_METADATA_URL,
+              clientId: CLIENT_METADATA_URL as 'https://notisky.symm.app/public/client-metadata/client.json',
               handleResolver: BLUESKY_SERVICE, 
               responseMode: 'fragment' // Still needed for init()
           });
@@ -179,9 +179,9 @@ function Login() {
         console.log('Generated state for OAuth flow:', state);
         
         console.log('Loading BrowserOAuthClient via load()...'); 
-        // Load client using the hosted metadata URL
+        // Load client using the hosted metadata URL with explicit literal type cast
         const oauthClient = await BrowserOAuthClient.load({ 
-            clientId: CLIENT_METADATA_URL, 
+            clientId: CLIENT_METADATA_URL as 'https://notisky.symm.app/public/client-metadata/client.json', 
             handleResolver: BLUESKY_SERVICE, 
             responseMode: 'fragment' 
         });

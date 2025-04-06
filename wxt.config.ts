@@ -15,7 +15,8 @@ export default defineConfig({
     ],
     host_permissions: [
       '*://*.bsky.app/*',
-      '*://*.bsky.social/*'
+      '*://*.bsky.social/*',
+      '*://*.notisky.symm.app/*'
     ],
     web_accessible_resources: [
       {

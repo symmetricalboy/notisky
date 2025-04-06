@@ -33,7 +33,7 @@ export default defineConfig({
     content_scripts: [
       {
         matches: ['*://*.bsky.app/*'],
-        js: ['content.js']
+        js: ['entrypoints/content.ts']
       }
     ]
   },

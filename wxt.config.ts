@@ -24,11 +24,6 @@ export default defineConfig({
         matches: ['*://*.bsky.app/*', '*://*.bsky.social/*']
       }
     ],
-    oauth2: {
-      // Use the client metadata document URL as client_id
-      client_id: 'https://notisky.symm.app/client-metadata/client.json',
-      scopes: ['atproto', 'transition:generic', 'transition:chat.bsky']
-    }
   },
   // Add explicit content scripts configuration
   contentScripts: {

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { browser } from 'wxt/browser';
-import { BrowserOAuthClient, type ClientMetadata } from '@atproto/oauth-client-browser';
+import { BrowserOAuthClient } from '@atproto/oauth-client-browser';
 import BskyAgent from '@atproto/api'; // Linter ignored
 import { Account } from '../../src/services/auth'; 
 import { BLUESKY_SERVICE } from '../../src/services/atproto-oauth';
@@ -34,27 +34,6 @@ const getRedirectURL = (): string => {
 const EXTENSION_REDIRECT_URL = getRedirectURL(); // Keep this for init() processing, but don't use in metadata
 const SHIM_REDIRECT_URL = 'https://notisky.symm.app/public/oauth-redirect-shim.html';
 const CLIENT_METADATA_URL = 'https://notisky.symm.app/public/client-metadata/client.json'; // Hosted metadata URL
-
-// Client Metadata (Embedded in the client)
-const clientMetadata: ClientMetadata = {
-  client_id: `https://notisky.symm.app/public/client-metadata/client.json` as `https://${string}`, 
-  client_name: 'Notisky', 
-  client_uri: `https://notisky.symm.app` as `https://${string}`, 
-  // IMPORTANT: Use ONLY the shim redirect URI here for the signIn request
-  redirect_uris: [`https://notisky.symm.app/public/oauth-redirect-shim.html` as `https://${string}`], 
-  logo_uri: 'https://notisky.symm.app/icon/128.png',
-  tos_uri: 'https://notisky.symm.app/terms',
-  policy_uri: 'https://notisky.symm.app/privacy',
-  contacts: ['notisky@symm.app'], 
-  token_endpoint_auth_method: 'none', 
-  grant_types: ['authorization_code', 'refresh_token'], 
-  response_types: ['code'], 
-  scope: 'atproto transition:generic transition:chat.bsky', 
-  application_type: 'web', 
-  dpop_bound_access_tokens: true 
-};
-
-// REMOVED tokenResponseToAccount helper (moved to auth.ts)
 
 // --- Helper Function (Moved back / recreated for UI context) ---
 async function oauthSessionToAccount(session: any): Promise<Account | null> {
@@ -121,16 +100,17 @@ function Login() {
         setLoading(true); 
         setInfo('Processing login callback...');
         setError(null);
-        console.log('OAuth callback fragment detected. Initializing client...');
+        console.log('OAuth callback fragment detected. Loading client via load()...');
         
-        // Instantiate client to process the callback
-        const oauthClient = new BrowserOAuthClient({ 
-            clientMetadata, 
-            handleResolver: BLUESKY_SERVICE, 
-            responseMode: 'fragment' // Match the mode used
-        });
-
         try {
+          // Load client using the hosted metadata URL
+          const oauthClient = await BrowserOAuthClient.load({ 
+              clientId: CLIENT_METADATA_URL,
+              handleResolver: BLUESKY_SERVICE, 
+              responseMode: 'fragment' // Still needed for init()
+          });
+          console.log('Client loaded successfully via load().');
+
           // init() parses the URL fragment, exchanges code, validates state/PKCE
           const result = await oauthClient.init(); 
           
@@ -165,7 +145,7 @@ function Login() {
              setInfo(null);
           }
         } catch (err: any) {
-          console.error('Error during OAuth init/callback processing:', err);
+          console.error('Error during OAuth load()/init() processing:', err);
           setError(`An error occurred during login processing: ${err.message || err}`);
           setInfo(null);
         } finally {
@@ -185,38 +165,50 @@ function Login() {
   // Handle initiating the OAuth sign-in flow
   const handleOAuthLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    console.log('handleOAuthLogin started (direct signIn)');
+    console.log('handleOAuthLogin started (using load() and authorize())');
     if (!handle) {
       setError('Please enter your Bluesky handle (e.g., yourname.bsky.social).');
       return;
     }
     setError(null);
-    setInfo('Redirecting to Bluesky for login...'); 
+    setInfo('Preparing login...'); 
     setLoading(true);
     
     try {
         const state = crypto.randomUUID(); // Generate unique state for this request
         console.log('Generated state for OAuth flow:', state);
         
-        console.log('Creating BrowserOAuthClient...'); 
-        // Instantiate client with embedded metadata using extension redirect URI
-        const oauthClient = new BrowserOAuthClient({ 
-            clientMetadata, // Contains EXTENSION_REDIRECT_URL
+        console.log('Loading BrowserOAuthClient via load()...'); 
+        // Load client using the hosted metadata URL
+        const oauthClient = await BrowserOAuthClient.load({ 
+            clientId: CLIENT_METADATA_URL, 
             handleResolver: BLUESKY_SERVICE, 
             responseMode: 'fragment' 
         });
+        console.log('Client loaded successfully via load().');
         
-        console.log('Calling await oauthClient.signIn() with state...');
-        // Let the client handle PKCE generation/storage and redirect
-        await oauthClient.signIn(handle.trim(), { state });
-        
-        // This part might not be reached unless signIn throws an immediate error
-        console.log('signIn call completed without throwing (redirect expected)...'); 
+        console.log('Calling await oauthClient.authorize() with handle and state...');
+        // Get the authorization URL (this should handle PAR internally)
+        const authorizationUrl = await oauthClient.authorize(handle.trim(), { state });
+        console.log('Authorization URL obtained:', authorizationUrl);
+
+        // Redirect manually
+        setInfo('Redirecting to Bluesky for authorization...');
+        console.log('Redirecting user agent to:', authorizationUrl);
+        window.open(authorizationUrl, '_self', 'noopener'); // Use _self to redirect current tab
+
+        // Protect against browser's back-forward cache as per docs
+        await new Promise<never>((resolve, reject) => {
+          setTimeout(
+            reject,
+            15_000, // Timeout after 15 seconds (adjust if needed)
+            new Error('User navigated back or authorization timed out'),
+          )
+        });
 
     } catch (err: any) {
-      // Catch immediate errors from signIn (like misconfiguration, network fail before redirect)
-      // The "User navigated back" error might still happen here
-      console.error('OAuth signIn initiation error:', err); 
+      // The 'User navigated back...' error will likely be caught here if timeout occurs
+      console.error('OAuth load()/authorize() initiation error:', err); 
       setError(`Failed to start login: ${err.message || err}`);
       setLoading(false);
       setInfo(null);

@@ -82,24 +82,30 @@ async function deactivateAccount(did: string): Promise<void> {
     updateNotificationBadge(); // Removed argument
 }
 
-// Initialize all accounts, try to activate sessions, and start polling
+// Initialize stored accounts on startup
 async function initializeAccounts(): Promise<void> {
   console.log('Initializing accounts...');
-  const accounts = await loadAccounts();
-  console.log('Accounts loaded from storage:', accounts);
+  const accountsData = await loadAccounts(); // Returns Record<string, Account>
+  console.log('Accounts data loaded from storage:', accountsData);
   activeAgents = {}; // Clear existing agents
   stopAllPolling(pollingIntervals);
 
-  for (const account of accounts) {
+  // Get the values (Account objects) from the loaded data
+  const accountsList = Object.values(accountsData);
+  console.log(`Found ${accountsList.length} accounts to initialize.`);
+
+  // Iterate over the array of accounts
+  for (const account of accountsList) {
       // Use activateOAuthSession for OAuth accounts
       const agent = await activateOAuthSession(account);
       if (agent) {
           activeAgents[account.did] = agent;
           startPollingForAccount(account, agent);
+      } else {
+          console.warn(`Failed to activate session for ${account.handle}. It might need re-authentication.`);
       }
   }
   console.log(`Initialization complete. Active agents: ${Object.keys(activeAgents).length}`);
-  updateNotificationBadge(); // Removed argument
 }
 
 export default defineBackground({

@@ -32,7 +32,7 @@ const getRedirectURL = (): string => {
 };
 
 const EXTENSION_REDIRECT_URL = getRedirectURL(); // Keep this for init() processing, but don't use in metadata
-const SHIM_REDIRECT_URL = 'https://notisky.symm.app/oauth-redirect-shim.html';
+const SHIM_REDIRECT_URL = 'https://notisky.symm.app/public/oauth-redirect-shim.html';
 const CLIENT_METADATA_URL = 'https://notisky.symm.app/public/client-metadata/client.json'; // Hosted metadata URL
 
 // Client Metadata (Embedded in the client)

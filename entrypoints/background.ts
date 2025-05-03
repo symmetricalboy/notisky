@@ -148,6 +148,23 @@ export default defineBackground({
     browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
       console.log('Background received message:', message.type, 'from', sender.tab?.url || sender.url || sender.id);
       
+      if (message.type === 'STORE_PKCE') {
+        const { state, verifier } = message.data || {};
+        if (state && verifier) {
+          storePkceState(state, verifier)
+            .then(() => sendResponse({ success: true }))
+            .catch(err => {
+              console.error('[STORE_PKCE] Error:', err);
+              sendResponse({ success: false, error: err.message });
+            });
+          return true; // Indicate async response
+        } else {
+          console.error('[STORE_PKCE] Missing state or verifier in message data.');
+          sendResponse({ success: false, error: 'Missing state or verifier' });
+          return false;
+        }
+      }
+
       if (message.type === 'INITIATE_LOGIN') {
         console.log('INITIATE_LOGIN message received. Acknowledged. UI should handle login flow.');
         sendResponse({ success: true, message: 'Acknowledged. UI initiates login.' });
@@ -247,7 +264,15 @@ export default defineBackground({
                  // We might not have a reliable way to send a response back to the originating UI
                  // The auth server page tries to close itself. Log the final result here.
                  console.log(`[OAuthCallback] Processing finished. Success: ${success}. ${success ? '' : 'Error: ' + errorMsg}`);
-                 // TODO: Consider notifying the popup or other UI elements about the result?
+                 // Send completion message back to any listening popups/UI
+                 browser.runtime.sendMessage({
+                   type: 'OAUTH_COMPLETE',
+                   success: success,
+                   error: success ? undefined : errorMsg
+                 }).catch(err => {
+                     // This might fail if no popup is open, which is okay.
+                     console.log('[OAuthCallback] Could not send completion message (maybe no UI open?):', err.message);
+                 });
             }
         })();
 
@@ -279,8 +304,16 @@ export default defineBackground({
                       console.error(`Error saving/activating newly added account ${account.did}:`, err);
                       errorMsg = err.message || errorMsg;
                   }
-                  // TODO: How to send response back reliably?
+                  // Send completion message (using OAUTH_COMPLETE for consistency? Or a specific ADDED_COMPLETE?)
                   console.log(`ACCOUNT_ADDED processing finished: success=${success}, error=${errorMsg}`);
+                  browser.runtime.sendMessage({
+                    type: 'OAUTH_COMPLETE', // Re-use OAUTH_COMPLETE for simplicity?
+                    success: success,
+                    error: success ? undefined : errorMsg,
+                    account: success ? account : undefined // Include account info on success
+                  }).catch(err => {
+                      console.log('[ACCOUNT_ADDED] Could not send completion message:', err.message);
+                  });
               })();
               return true; // Indicate async
           } else {

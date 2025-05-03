@@ -14,6 +14,10 @@ const TOKEN_ENDPOINT = `${BLUESKY_SERVICE}/oauth/token`;
 const CLIENT_METADATA_URL = 'https://notisky.symm.app/client-metadata/client.json'; // Corrected Client ID URL
 const REDIRECT_URI = 'https://notisky.symm.app/api/auth/extension-callback'; // Corrected Redirect URI
 
+// Target URL for programmatic injection
+const AUTH_FINALIZE_URL_ORIGIN = 'https://notisky.symm.app';
+const AUTH_FINALIZE_URL_PATH = '/auth-finalize.html';
+
 // Store for authenticated accounts AND their agent instances
 let activeAgents: Record<string, BskyAgent> = {};
 // Store polling intervals
@@ -109,6 +113,72 @@ async function retrieveAndClearPkceState(state: string): Promise<string | null> 
   return null;
 }
 
+// Function containing the logic to be injected into the auth finalize page
+function injectedAuthFinalizeLogic() {
+  // This code runs in the context of the web page
+  console.log('[Injected Script] Running in finalize page.');
+  
+  /** 
+   * Updates the status message on the page.
+   */
+  function setStatus(message: string, isError = false) {
+    const statusEl = document.getElementById('auth-status');
+    const messageEl = document.getElementById('auth-message');
+    if (statusEl && messageEl) {
+      statusEl.textContent = message;
+      statusEl.className = isError ? 'status error' : 'status success';
+      messageEl.textContent = isError ? 'Please check the extension logs or try again.' : 'You can now close this window.';
+    } else {
+      console.warn('[Injected Script] Status elements not found');
+    }
+  }
+
+  (async () => {
+    try {
+      setStatus('Reading parameters...');
+      const params = new URLSearchParams(window.location.search);
+      const code = params.get('code');
+      const state = params.get('state');
+      const error = params.get('error');
+      const errorDescription = params.get('error_description');
+
+      if (error) {
+        console.error('[Injected Script] Error in URL:', error, errorDescription);
+        setStatus(`Error: ${error} - ${errorDescription || 'Please try again.'}`, true);
+        return;
+      }
+
+      if (!code || !state) {
+        throw new Error('Missing code or state parameter in callback URL.');
+      }
+
+      setStatus('Sending details to background service...');
+      console.log('[Injected Script] Sending OAUTH_CALLBACK to background...');
+
+      // Send message to background script (browser API is available here)
+      // Note: `browser` might be undefined if running in pure Chrome, use `chrome` as fallback
+      const runtime = typeof browser !== 'undefined' ? browser.runtime : chrome.runtime;
+      const response = await runtime.sendMessage({
+        type: 'OAUTH_CALLBACK',
+        data: { code, state }
+      });
+
+      console.log('[Injected Script] Background response:', response);
+      setStatus('Authentication details sent. Background is processing...');
+
+      setTimeout(() => {
+         console.log('[Injected Script] Attempting to close window.');
+         window.close();
+         setStatus('Processing complete. Please close this window manually.', false);
+      }, 3000);
+
+    } catch (err) {
+      console.error('[Injected Script] Error:', err);
+      setStatus('Error: ' + (err instanceof Error ? err.message : String(err)), true);
+    }
+  })();
+}
+
 // Initialize stored accounts on startup
 async function initializeAccounts(): Promise<void> {
   console.log('Initializing accounts...');
@@ -172,17 +242,18 @@ export default defineBackground({
       }
 
       if (message.type === 'OAUTH_CALLBACK') {
-        console.log('[Background] Received OAUTH_CALLBACK from auth server page.');
+        console.log('[Background] Received OAUTH_CALLBACK from injected script or other source.');
         const { code, state } = message.data || {};
 
         if (!code || !state) {
           console.error('[Background][OAUTH_CALLBACK] Missing code or state in message data.');
-          // Can't reliably send back to popup here, just log.
-          return false; // Indicate synchronous handling (error case)
+          // Acknowledge if possible, though sender might be gone
+          if (sendResponse) sendResponse({ success: false, error: 'Missing code or state' });
+          return false; 
         }
 
-        // Send acknowledgement back to the auth page script (optional)
-        sendResponse({ success: true, message: 'Processing callback...'});
+        // Acknowledge receipt to the sender (the injected script)
+        if (sendResponse) sendResponse({ success: true, message: 'Processing callback...'});
 
         // Process the token exchange asynchronously
         (async () => {
@@ -377,6 +448,40 @@ export default defineBackground({
       console.log(`Notification clicked: ${notificationId}`);
       browser.tabs.create({ url: 'https://bsky.app/notifications' });
       browser.notifications.clear(notificationId);
+    });
+
+    // --- New Tab Update Listener for Script Injection --- 
+    browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+        // Inject script only when the target page finishes loading
+        if (changeInfo.status === 'complete' && tab.url) {
+            try {
+                const url = new URL(tab.url);
+                if (url.origin === AUTH_FINALIZE_URL_ORIGIN && url.pathname === AUTH_FINALIZE_URL_PATH) {
+                    console.log(`[Background] Detected auth finalize page loaded: ${tab.url}`);
+                    
+                    // Check if scripting permission is granted
+                    const hasPermission = await browser.permissions.contains({ permissions: ['scripting'], origins: [url.origin + '/*'] });
+                    if (!hasPermission) {
+                       console.error(`[Background] Missing scripting permission for ${url.origin}`);
+                       // Attempt to request permission? Or just log error.
+                       // Maybe prompt user via notification?
+                       return; 
+                    }
+
+                    await browser.scripting.executeScript({
+                        target: { tabId: tabId },
+                        func: injectedAuthFinalizeLogic, // Inject the function defined above
+                        // files: ['entrypoints/auth-finalize-cs.js'] // Alternative: Inject the built file
+                    });
+                    console.log('[Background] Injected auth finalize script.');
+                }
+            } catch (error) {
+                // Ignore errors from invalid URLs (like about:blank)
+                if (!(error instanceof TypeError && error.message.includes('Invalid URL'))) {
+                   console.error('[Background] Error in tabs.onUpdated listener:', error);
+                }
+            }
+        }
     });
 
     // Initial load of accounts

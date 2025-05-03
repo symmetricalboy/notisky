@@ -39,7 +39,7 @@ authRouter.get('/ext-auth', async (req, res) => {
   // TODO: Replace with dynamic URL or environment variable for production!
   const isLocal = req.hostname.includes('localhost') || req.hostname.includes('127.0.0.1');
   const functionBaseUrl = isLocal ? `http://${req.get('host')}` : `https://${req.get('host')}`; // Basic detection
-  const redirectUri = `${functionBaseUrl}/api/auth/extension-callback`; // Assumes function root handles /api/auth
+  const redirectUri = `${functionBaseUrl}/notiskyAuth/api/auth/extension-callback`; // Assumes function root handles /api/auth
 
   console.log(`[CloudFunc] /ext-auth determined redirect URI: ${redirectUri}`);
 

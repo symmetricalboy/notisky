@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "es2018",                       // Node.js 18 supports modern ES features
+    "module": "commonjs",                     // Standard for Node.js
+    "lib": ["es2018"],
+    "outDir": "./build",                      // Output directory for compiled JS
+    "rootDir": "./src",                       // Root directory of source files
+    "strict": true,                          // Enable all strict type-checking options
+    "esModuleInterop": true,                 // Enables compatibility with CommonJS modules
+    "skipLibCheck": true,                    // Skip type checking of declaration files
+    "forceConsistentCasingInFileNames": true, // Disallow inconsistently-cased references
+    "resolveJsonModule": true                // Allow importing JSON files
+  },
+  "include": ["src/**/*"],                  // Include all files in the src directory
+  "exclude": ["node_modules", "**/*.spec.ts"] // Exclude node_modules and test files
+} 

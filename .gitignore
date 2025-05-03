@@ -3,10 +3,13 @@
 /.pnp
 .pnp.js
 
+
 # Build directories
+/.wxt
 /.output
 /dist
 /coverage
+/build
 
 # Local env files
 .env

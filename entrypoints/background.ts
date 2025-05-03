@@ -271,6 +271,8 @@ export default defineBackground({
 
                 // --- Perform Token Exchange --- 
                 console.log('[Background][OAUTH_CALLBACK] Performing token exchange...');
+                console.log(`[Background][OAUTH_CALLBACK] Using redirect_uri: ${REDIRECT_URI}`); // Log redirect uri
+                console.log(`[Background][OAUTH_CALLBACK] Using client_id: ${CLIENT_METADATA_URL}`); // Log client id
                 const tokenRequestBody = new URLSearchParams({
                   grant_type: 'authorization_code',
                   code: code,
@@ -322,8 +324,14 @@ export default defineBackground({
                 console.error('[Background][OAUTH_CALLBACK] Error during token exchange or account setup:', err);
                 errorMsg = err.message || 'An unknown error occurred.';
                 success = false;
-                // Ensure PKCE state is cleared even on error if verifier was retrieved
-                if (verifier && state) await retrieveAndClearPkceState(state); // Attempt cleanup just in case
+                // Ensure PKCE state is cleared ONLY if it hasn't been already
+                // Check if the verifier was retrieved *before* attempting to clear again.
+                // However, retrieveAndClearPkceState already deletes it on success,
+                // so we don't need to explicitly clear it again here in the catch block.
+                // if (verifier && state) { 
+                //    console.log('[Background][OAUTH_CALLBACK] Verifier existed, attempting cleanup (should not happen if retrieved successfully).');
+                //    await retrieveAndClearPkceState(state); // Potentially problematic if already cleared
+                // }
             }
 
             // --- Send final status message to Popup --- 

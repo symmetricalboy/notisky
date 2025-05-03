@@ -26,7 +26,7 @@ export default defineConfig({
       }
     ],
     content_security_policy: {
-      extension_pages: "script-src 'self'; object-src 'self'; connect-src 'self' https://*.bsky.social https://notisky.symm.app;",
+      extension_pages: "script-src 'self'; object-src 'self'; connect-src 'self' https://bsky.social https://*.bsky.social https://notisky.symm.app;",
     },
   },
 }); 

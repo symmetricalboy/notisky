@@ -11,8 +11,8 @@ import {
 // Constants for OAuth Token Exchange
 const BLUESKY_SERVICE = 'https://bsky.social'; // Base service URL
 const TOKEN_ENDPOINT = `${BLUESKY_SERVICE}/oauth/token`;
-const CLIENT_METADATA_URL = 'https://notisky.symm.app/public/client-metadata/client.json'; // Our client ID
-const WEB_CALLBACK_URL = 'https://notisky.symm.app/public/oauth-callback.html'; // Redirect URI used in flow
+const CLIENT_METADATA_URL = 'https://notisky.symm.app/client-metadata/client.json'; // Corrected Client ID URL
+const REDIRECT_URI = 'https://notisky.symm.app/api/auth/extension-callback'; // Corrected Redirect URI
 
 // Store for authenticated accounts AND their agent instances
 let activeAgents: Record<string, BskyAgent> = {};
@@ -171,112 +171,106 @@ export default defineBackground({
         return false; 
       }
 
-      if (message.type === 'oauthCallback') {
-        console.log('[OAuthCallback] Received callback from auth server page.');
+      if (message.type === 'OAUTH_CALLBACK') {
+        console.log('[Background] Received OAUTH_CALLBACK from auth server page.');
         const { code, state } = message.data || {};
 
         if (!code || !state) {
-          console.error('[OAuthCallback] Missing code or state in message data.');
-          // Optionally send an error response back to the auth page if needed, though it might close itself
-          sendResponse({ success: false, error: 'Missing code or state' });
-          return false; // Indicate synchronous handling or end of processing here
+          console.error('[Background][OAUTH_CALLBACK] Missing code or state in message data.');
+          // Can't reliably send back to popup here, just log.
+          return false; // Indicate synchronous handling (error case)
         }
 
-        // Indicate async handling
+        // Send acknowledgement back to the auth page script (optional)
         sendResponse({ success: true, message: 'Processing callback...'});
 
+        // Process the token exchange asynchronously
         (async () => {
             let success = false;
             let errorMsg = 'Unknown error during token exchange.';
             let verifier: string | null = null;
             try {
-                console.log(`[OAuthCallback] Received code for state: ${state}`);
+                console.log(`[Background][OAUTH_CALLBACK] Processing code for state: ${state.substring(0,5)}...`);
                 verifier = await retrieveAndClearPkceState(state);
 
                 if (!verifier) {
                     throw new Error(`PKCE Verifier not found or expired for state: ${state}`);
                 }
-                console.log('[OAuthCallback] Retrieved PKCE verifier.');
+                console.log('[Background][OAUTH_CALLBACK] Retrieved PKCE verifier.');
 
-                const tokenParams = new URLSearchParams({
-                    grant_type: 'authorization_code',
-                    code: code,
-                    // IMPORTANT: Use the redirect_uri that the AUTH SERVER used
-                    redirect_uri: 'https://notisky.symm.app/auth/extension-callback',
-                    // Use the client_id that the AUTH SERVER used
-                    client_id: CLIENT_METADATA_URL, // Defined at top of file
-                    code_verifier: verifier
+                // --- Perform Token Exchange --- 
+                console.log('[Background][OAUTH_CALLBACK] Performing token exchange...');
+                const tokenRequestBody = new URLSearchParams({
+                  grant_type: 'authorization_code',
+                  code: code,
+                  redirect_uri: REDIRECT_URI,
+                  client_id: CLIENT_METADATA_URL,
+                  code_verifier: verifier
                 });
 
-                console.log('[OAuthCallback] Sending token exchange request to:', TOKEN_ENDPOINT);
-                const response = await fetch(TOKEN_ENDPOINT, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/x-www-form-urlencoded'
-                    },
-                    body: tokenParams.toString()
+                const tokenResponse = await fetch(TOKEN_ENDPOINT, {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                  },
+                  body: tokenRequestBody.toString()
                 });
 
-                console.log(`[OAuthCallback] Token response status: ${response.status}`);
-                const tokenData = await response.json();
+                const tokenData = await tokenResponse.json();
 
-                if (!response.ok) {
-                    errorMsg = `Token exchange failed: ${tokenData.error || response.statusText} (${response.status})`;
-                    console.error('[OAuthCallback] Error response:', tokenData);
-                    throw new Error(errorMsg);
+                if (!tokenResponse.ok) {
+                   throw new Error(`Token exchange failed (${tokenResponse.status}): ${tokenData.error || 'Unknown error'} - ${tokenData.error_description || 'No description'}`);
                 }
 
-                console.log('[OAuthCallback] Token data received successfully.');
+                if (!tokenData.access_token || !tokenData.refresh_token || !tokenData.did) {
+                  throw new Error('Token response missing required fields (access_token, refresh_token, did).');
+                }
 
-                // Use tokenResponseToAccount to create the account object (handles profile fetch etc.)
-                // Assuming tokenData contains access_token, refresh_token, did, scope etc.
+                console.log(`[Background][OAUTH_CALLBACK] Token exchange successful for DID: ${tokenData.did}`);
+
+                // Convert token data to Account structure (fetches profile for handle)
                 const newAccount = await tokenResponseToAccount(tokenData);
 
                 if (!newAccount) {
-                    errorMsg = 'Failed to process token response and create account object.';
-                    console.error('[OAuthCallback] tokenResponseToAccount returned null.', tokenData);
-                    throw new Error(errorMsg);
+                  throw new Error('Failed to create account object from token response.');
                 }
 
-                console.log('[OAuthCallback] Account created/parsed:', newAccount.handle);
-
-                // Save account and activate session
+                // Save account and activate session/polling
                 await saveAccount(newAccount);
                 const agent = await activateOAuthSession(newAccount);
                 if (agent) {
-                    activeAgents[newAccount.did] = agent;
-                    startPollingForAccount(newAccount, agent);
-                    updateNotificationBadge(); // Update badge after successful login
-                    success = true;
-                    console.log('[OAuthCallback] Account saved and activated successfully.');
+                  activeAgents[newAccount.did] = agent;
+                  startPollingForAccount(newAccount, agent);
+                  success = true;
+                  console.log(`[Background][OAUTH_CALLBACK] Account ${newAccount.handle} activated and polling started.`);
                 } else {
-                     errorMsg = 'Failed to activate agent session after token exchange.';
-                     throw new Error(errorMsg);
+                  throw new Error('Failed to activate agent session after token exchange.');
                 }
 
-            } catch (error: any) {
-                console.error('[OAuthCallback] Error during processing:', error);
-                errorMsg = error.message || errorMsg;
+            } catch (err: any) {
+                console.error('[Background][OAUTH_CALLBACK] Error during token exchange or account setup:', err);
+                errorMsg = err.message || 'An unknown error occurred.';
                 success = false;
-                // Ensure PKCE state is cleared on error too
-                if (state && !verifier) await retrieveAndClearPkceState(state);
-            } finally {
-                 // We might not have a reliable way to send a response back to the originating UI
-                 // The auth server page tries to close itself. Log the final result here.
-                 console.log(`[OAuthCallback] Processing finished. Success: ${success}. ${success ? '' : 'Error: ' + errorMsg}`);
-                 // Send completion message back to any listening popups/UI
-                 browser.runtime.sendMessage({
-                   type: 'OAUTH_COMPLETE',
-                   success: success,
-                   error: success ? undefined : errorMsg
-                 }).catch(err => {
-                     // This might fail if no popup is open, which is okay.
-                     console.log('[OAuthCallback] Could not send completion message (maybe no UI open?):', err.message);
-                 });
+                // Ensure PKCE state is cleared even on error if verifier was retrieved
+                if (verifier && state) await retrieveAndClearPkceState(state); // Attempt cleanup just in case
+            }
+
+            // --- Send final status message to Popup --- 
+            console.log(`[Background][OAUTH_CALLBACK] Sending OAUTH_COMPLETE to UI. Success: ${success}`);
+            try {
+              // Send globally, popup listener will pick it up
+              await browser.runtime.sendMessage({ 
+                type: 'OAUTH_COMPLETE', 
+                success: success, 
+                error: success ? undefined : errorMsg 
+              });
+            } catch (sendMessageError) {
+              console.error('[Background][OAUTH_CALLBACK] Failed to send OAUTH_COMPLETE message to UI:', sendMessageError);
+              // This might happen if the popup was closed. Should be okay.
             }
         })();
 
-        return true; // Indicate async handling is underway
+        return true; // Indicate async response started
       }
       
       if (message.type === 'ACCOUNT_ADDED') {

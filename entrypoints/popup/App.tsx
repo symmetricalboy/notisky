@@ -25,8 +25,8 @@ async function generateCodeChallenge(verifier: string): Promise<string> {
 }
 
 // --- Constants --- MUST MATCH SERVER CONFIG
-const AUTH_SERVER_BASE_URL = 'https://us-central1-symm-gemini.cloudfunctions.net/notiskyAuth'; // Use env var for dev/prod
-// const AUTH_SERVER_BASE_URL = 'http://localhost:3000'; // Example for local dev
+const AUTH_SERVER_BASE_URL = 'https://notisky.symm.app'; // Updated URL
+// const AUTH_SERVER_BASE_URL = 'http://localhost:3001'; // For local testing
 const AUTH_INITIATE_ENDPOINT = `${AUTH_SERVER_BASE_URL}/api/auth/ext-auth`;
 
 function Login() {
@@ -42,6 +42,7 @@ function Login() {
           return;
        }
        console.log('[Popup] Received message:', message);
+       // Check for the final completion message from the background script
        if (message.type === 'OAUTH_COMPLETE') {
           setIsLoading(false);
           if (message.success) {

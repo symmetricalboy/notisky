@@ -144,6 +144,7 @@ declare module "wxt/browser" {
     | "/index.html"
     | "/login.html"
     | "/oauth-callback.html"
+    | "/oauth-callback.html"
     | "/oauth-redirect-shim.html"
     | "/options.html"
     | "/popup.html"

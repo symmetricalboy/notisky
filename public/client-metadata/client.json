@@ -1,9 +1,9 @@
 {
   "client_id": "https://notisky.symm.app/public/client-metadata/client.json",
   "client_name": "Notisky",
-  "client_uri": "https://us-central1-symm-gemini.cloudfunctions.net",
+  "client_uri": "https://us-central1-symm-gemini.cloudfunctions.net/notiskyAuth",
   "redirect_uris": [
-    "https://us-central1-symm-gemini.cloudfunctions.net/api/auth/extension-callback"
+    "https://us-central1-symm-gemini.cloudfunctions.net/notiskyAuth/api/auth/extension-callback"
   ],
   "logo_uri": "https://notisky.symm.app/icon/128.png",
   "tos_uri": "https://notisky.symm.app/terms",

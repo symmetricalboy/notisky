@@ -1,15 +1,20 @@
 # Dependencies
 /node_modules
+/node_modules/*
+/functions/node_modules
+/functions/node_modules/*
 /.pnp
 .pnp.js
 
-
 # Build directories
 /.wxt
+/.wxt/*
 /.output
 /dist
 /coverage
 /build
+/functions/build
+/functions/build/*
 
 # Local env files
 .env

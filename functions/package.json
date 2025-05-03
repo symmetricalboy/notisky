@@ -7,7 +7,7 @@
     "build": "tsc",
     "start": "functions-framework --target=notiskyAuth",
     "prestart": "npm run build",
-    "deploy": "npm run build && gcloud functions deploy notiskyAuth --gen2 --runtime=nodejs18 --region=YOUR_REGION --source=. --entry-point=notiskyAuth --trigger-http --allow-unauthenticated"
+    "deploy": "npm run build && gcloud functions deploy notiskyAuth --gen2 --runtime=nodejs18 --region=us-central1 --source=. --entry-point=notiskyAuth --trigger-http --allow-unauthenticated"
   },
   "engines": {
     "node": "18"

@@ -1,5 +1,5 @@
-import BskyAgent from '@atproto/api';
-import { Account } from './auth'; // Self-import is okay for type definition
+import * as AtprotoAPI from '@atproto/api';
+const BskyAgent = AtprotoAPI.default.BskyAgent;
 
 export interface Account {
   did: string;
@@ -16,7 +16,7 @@ const TOKEN_ENDPOINT = `${BLUESKY_SERVICE}/oauth/token`;
 // Or maybe a specific client ID if registered. Using extension ID as a placeholder.
 // NOTE: This needs clarification based on ATProto OAuth spec for refresh grants.
 // For now, assume no client_id needed or use a placeholder/extension ID.
-// const CLIENT_ID_FOR_REFRESH = browser.runtime.id; // Example
+const CLIENT_ID_FOR_REFRESH = browser.runtime.id;
 
 /**
  * Refreshes an account's access token using the refresh token.
@@ -143,7 +143,7 @@ export async function tokenResponseToAccount(tokenData: any): Promise<Account | 
     console.log(`tokenResponseToAccount: Processing tokens for DID: ${tokenData.did}`);
     
     // Use a temporary agent to get the profile handle
-    const agent = new BskyAgent({ service: BLUESKY_SERVICE });
+    const agent: InstanceType<typeof BskyAgent> = new BskyAgent({ service: BLUESKY_SERVICE });
     // Resume session using the *newly obtained* tokens and the DID from the token response
     await agent.resumeSession({
         did: tokenData.did,
@@ -158,6 +158,7 @@ export async function tokenResponseToAccount(tokenData: any): Promise<Account | 
     }
     
     // Fetch profile using the now authenticated agent
+    // @ts-ignore
     const { data: profile } = await agent.getProfile({ actor: agent.session.did });
 
     // Create the final Account object

@@ -30,12 +30,12 @@ export default defineConfig({
       // sandbox: "sandbox allow-scripts allow-forms allow-popups allow-modals; script-src 'self' 'unsafe-inline' 'unsafe-eval'; child-src 'self';" // If using sandbox
     },
     // Add explicit content scripts configuration
-    content_scripts: [
-      {
-        matches: ['*://*.bsky.app/*'],
-        js: ['entrypoints/content.ts']
-      }
-    ]
+    // content_scripts: [
+    //   {
+    //     matches: ['*://*.bsky.app/*'],
+    //     js: ['entrypoints/content.ts']
+    //   }
+    // ]
   },
   // REMOVED define block for now
 }); 

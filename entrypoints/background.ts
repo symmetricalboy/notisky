@@ -1,5 +1,5 @@
 import BskyAgent from '@atproto/api';
-import { Account, loadAccounts, saveAccount, removeAccount } from '../src/services/auth';
+import { Account, loadAccounts, saveAccount, removeAccount, tokenResponseToAccount } from '../src/services/auth';
 import { 
   startNotificationPolling, 
   stopNotificationPolling, 
@@ -18,6 +18,8 @@ const WEB_CALLBACK_URL = 'https://notisky.symm.app/public/oauth-callback.html'; 
 let activeAgents: Record<string, BskyAgent> = {};
 // Store polling intervals
 const pollingIntervals: Record<string, number> = {};
+// Store PKCE verifiers during OAuth flow, keyed by state
+const pkceVerifierStore: Record<string, string> = {}; // Use in-memory for now, consider browser.storage.session
 
 // Function to attempt resuming session or refreshing token for an account
 // NOTE: With OAuth, refreshing is handled by exchanging the refresh_token, not via resumeSession like password auth
@@ -82,6 +84,31 @@ async function deactivateAccount(did: string): Promise<void> {
     updateNotificationBadge(); // Removed argument
 }
 
+// Store PKCE state temporarily (in-memory, suitable for Service Worker)
+async function storePkceState(state: string, verifier: string): Promise<void> {
+  pkceVerifierStore[state] = verifier;
+  console.log(`[PKCE] Stored verifier for state: ${state.substring(0,5)}...`);
+  // Optional: Add a timeout to clean up old states if needed
+  setTimeout(() => {
+    if (pkceVerifierStore[state]) {
+      console.warn(`[PKCE] Cleaning up stale state: ${state.substring(0,5)}...`);
+      delete pkceVerifierStore[state];
+    }
+  }, 5 * 60 * 1000); // Clean up after 5 minutes
+}
+
+// Retrieve and remove PKCE state
+async function retrieveAndClearPkceState(state: string): Promise<string | null> {
+  const verifier = pkceVerifierStore[state];
+  if (verifier) {
+    console.log(`[PKCE] Retrieved verifier for state: ${state.substring(0,5)}...`);
+    delete pkceVerifierStore[state]; // Clear after retrieval
+    return verifier;
+  }
+  console.error(`[PKCE] Verifier not found for state: ${state}`);
+  return null;
+}
+
 // Initialize stored accounts on startup
 async function initializeAccounts(): Promise<void> {
   console.log('Initializing accounts...');
@@ -127,36 +154,44 @@ export default defineBackground({
         return false; 
       }
 
-      if (message.type === 'EXCHANGE_OAUTH_CODE') {
-        // Immediately return true to indicate async response
-        sendResponse(); 
-        const { code, state, verifierStorageKey } = message.data;
+      if (message.type === 'oauthCallback') {
+        console.log('[OAuthCallback] Received callback from auth server page.');
+        const { code, state } = message.data || {};
+
+        if (!code || !state) {
+          console.error('[OAuthCallback] Missing code or state in message data.');
+          // Optionally send an error response back to the auth page if needed, though it might close itself
+          sendResponse({ success: false, error: 'Missing code or state' });
+          return false; // Indicate synchronous handling or end of processing here
+        }
+
+        // Indicate async handling
+        sendResponse({ success: true, message: 'Processing callback...'});
 
         (async () => {
             let success = false;
             let errorMsg = 'Unknown error during token exchange.';
+            let verifier: string | null = null;
             try {
-                console.log(`[TokenExchange] Received code for state: ${state}`);
-                if (!verifierStorageKey || !code) {
-                    throw new Error('Missing code or verifier key.');
-                }
-                const codeVerifier = localStorage.getItem(verifierStorageKey);
-                localStorage.removeItem(verifierStorageKey); // Clean up immediately
+                console.log(`[OAuthCallback] Received code for state: ${state}`);
+                verifier = await retrieveAndClearPkceState(state);
 
-                if (!codeVerifier) {
-                    throw new Error(`PKCE Verifier not found for key: ${verifierStorageKey}`);
+                if (!verifier) {
+                    throw new Error(`PKCE Verifier not found or expired for state: ${state}`);
                 }
-                console.log('[TokenExchange] Retrieved PKCE verifier.');
+                console.log('[OAuthCallback] Retrieved PKCE verifier.');
 
                 const tokenParams = new URLSearchParams({
                     grant_type: 'authorization_code',
                     code: code,
-                    redirect_uri: WEB_CALLBACK_URL,
-                    client_id: CLIENT_METADATA_URL,
-                    code_verifier: codeVerifier
+                    // IMPORTANT: Use the redirect_uri that the AUTH SERVER used
+                    redirect_uri: 'https://notisky.symm.app/auth/extension-callback',
+                    // Use the client_id that the AUTH SERVER used
+                    client_id: CLIENT_METADATA_URL, // Defined at top of file
+                    code_verifier: verifier
                 });
 
-                console.log('[TokenExchange] Sending request to:', TOKEN_ENDPOINT);
+                console.log('[OAuthCallback] Sending token exchange request to:', TOKEN_ENDPOINT);
                 const response = await fetch(TOKEN_ENDPOINT, {
                     method: 'POST',
                     headers: {
@@ -165,98 +200,92 @@ export default defineBackground({
                     body: tokenParams.toString()
                 });
 
-                console.log(`[TokenExchange] Response status: ${response.status}`);
+                console.log(`[OAuthCallback] Token response status: ${response.status}`);
                 const tokenData = await response.json();
 
                 if (!response.ok) {
-                    errorMsg = `Token exchange failed: ${tokenData.error || response.statusText}`;
-                    console.error('[TokenExchange] Error response:', tokenData);
+                    errorMsg = `Token exchange failed: ${tokenData.error || response.statusText} (${response.status})`;
+                    console.error('[OAuthCallback] Error response:', tokenData);
                     throw new Error(errorMsg);
                 }
 
-                console.log('[TokenExchange] Token data received:', tokenData);
+                console.log('[OAuthCallback] Token data received successfully.');
 
-                // Basic validation of expected token data
-                if (!tokenData.access_token || !tokenData.refresh_token || !tokenData.did || !tokenData.handle) {
-                    errorMsg = 'Incomplete token data received from server.';
-                    console.error('[TokenExchange] Incomplete data:', tokenData);
+                // Use tokenResponseToAccount to create the account object (handles profile fetch etc.)
+                // Assuming tokenData contains access_token, refresh_token, did, scope etc.
+                const newAccount = await tokenResponseToAccount(tokenData);
+
+                if (!newAccount) {
+                    errorMsg = 'Failed to process token response and create account object.';
+                    console.error('[OAuthCallback] tokenResponseToAccount returned null.', tokenData);
                     throw new Error(errorMsg);
                 }
 
-                // Create Account object
-                const newAccount: Account = {
-                    did: tokenData.did,
-                    handle: tokenData.handle,
-                    accessJwt: tokenData.access_token,
-                    refreshJwt: tokenData.refresh_token,
-                    email: tokenData.email || undefined // Email might not always be present
-                };
+                console.log('[OAuthCallback] Account created/parsed:', newAccount.handle);
 
-                console.log('[TokenExchange] Account created:', newAccount.handle);
-                
                 // Save account and activate session
                 await saveAccount(newAccount);
                 const agent = await activateOAuthSession(newAccount);
                 if (agent) {
                     activeAgents[newAccount.did] = agent;
                     startPollingForAccount(newAccount, agent);
+                    updateNotificationBadge(); // Update badge after successful login
                     success = true;
-                    console.log('[TokenExchange] Account saved and activated.');
+                    console.log('[OAuthCallback] Account saved and activated successfully.');
                 } else {
-                     errorMsg = 'Failed to activate session after token exchange.';
+                     errorMsg = 'Failed to activate agent session after token exchange.';
                      throw new Error(errorMsg);
                 }
 
             } catch (error: any) {
-                console.error('[TokenExchange] Error:', error);
+                console.error('[OAuthCallback] Error during processing:', error);
                 errorMsg = error.message || errorMsg;
                 success = false;
-                // Attempt cleanup again just in case
-                if (verifierStorageKey) localStorage.removeItem(verifierStorageKey);
+                // Ensure PKCE state is cleared on error too
+                if (state && !verifier) await retrieveAndClearPkceState(state);
             } finally {
-                 // Send response back to the popup/sender
-                 console.log(`[TokenExchange] Sending response: success=${success}, error=${errorMsg}`);
-                 // Need to use chrome.tabs.sendMessage for Manifest V3 if sender.tab exists
-                 if (sender.tab?.id) {
-                     browser.tabs.sendMessage(sender.tab.id, { 
-                         type: 'EXCHANGE_OAUTH_CODE_RESULT', // Use a different type for the response
-                         success: success, 
-                         error: success ? undefined : errorMsg 
-                     });
-                 } else {
-                     console.warn('[TokenExchange] Could not determine sender tab ID to send response.');
-                     // Fallback or alternative if needed, e.g., storing result and having popup poll?
-                 }
+                 // We might not have a reliable way to send a response back to the originating UI
+                 // The auth server page tries to close itself. Log the final result here.
+                 console.log(`[OAuthCallback] Processing finished. Success: ${success}. ${success ? '' : 'Error: ' + errorMsg}`);
+                 // TODO: Consider notifying the popup or other UI elements about the result?
             }
         })();
-        
-        return true; // Indicate async handling (though sendResponse was called earlier)
+
+        return true; // Indicate async handling is underway
       }
       
       if (message.type === 'ACCOUNT_ADDED') {
           const { account } = message.data || {};
           if (account && account.did) {
               console.log(`ACCOUNT_ADDED message received for ${account.handle} (${account.did})`);
-              saveAccount(account).then(async () => {
-                  const agent = await activateOAuthSession(account);
-                  if (agent) {
-                      activeAgents[account.did] = agent;
-                      startPollingForAccount(account, agent); // Use updated signature
-                      updateNotificationBadge(); // Removed argument
-                      sendResponse({ success: true });
-                  } else {
-                      console.error(`Failed to activate session for newly added account ${account.did}`);
-                      sendResponse({ success: false, error: 'Failed to activate session after login.' });
+              // Indicate async handling
+              sendResponse(); 
+              (async () => {
+                  let success = false;
+                  let errorMsg = 'Failed to save or activate account.';
+                  try {
+                      await saveAccount(account);
+                      const agent = await activateOAuthSession(account);
+                      if (agent) {
+                          activeAgents[account.did] = agent;
+                          startPollingForAccount(account, agent); // Use updated signature
+                          updateNotificationBadge(); // Removed argument
+                          success = true;
+                      } else {
+                          console.error(`Failed to activate session for newly added account ${account.did}`);
+                          errorMsg = 'Failed to activate session after login.';
+                      }
+                  } catch(err: any) {
+                      console.error(`Error saving/activating newly added account ${account.did}:`, err);
+                      errorMsg = err.message || errorMsg;
                   }
-              }).catch(err => {
-                  console.error('Error saving new account', err);
-                  sendResponse({ success: false, error: 'Failed to save account.' });
-              });
-              return true; // Indicate async response
+                  // TODO: How to send response back reliably?
+                  console.log(`ACCOUNT_ADDED processing finished: success=${success}, error=${errorMsg}`);
+              })();
+              return true; // Indicate async
           } else {
-              console.error('ACCOUNT_ADDED message received with invalid account data', message.data);
-              sendResponse({ success: false, error: 'Invalid account data received.' });
-              return false;
+              console.error('ACCOUNT_ADDED message received without valid account data.');
+              sendResponse({ success: false, error: 'Invalid account data provided.' });
           }
       }
       
@@ -323,16 +352,19 @@ export default defineBackground({
       browser.notifications.clear(notificationId);
     });
 
-    // COMMENTED OUT storage listener - needs careful implementation if required
-    /* browser.storage.onChanged.addListener((changes, areaName) => {
-      if (areaName === 'local' && changes.accounts) {
-        console.log('Storage changed detected for accounts - Re-initialization needed?');
-        // Potentially complex logic here to diff changes and update activeAgents/polling
-        // initializeAccounts(); // Avoid simple re-init, could cause issues
-      }
-    }); */
+    // Initial load of accounts
+    initializeAccounts().catch(error => {
+        console.error('Failed to initialize accounts on startup:', error);
+    });
 
-    // Initialize accounts when the extension starts
-    initializeAccounts();
+    // Listener for storage changes to keep accounts in sync
+    browser.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName === 'local' && changes.accounts) {
+        console.log('Account storage changed, re-initializing...');
+        initializeAccounts().catch(error => {
+          console.error('Failed to re-initialize accounts after storage change:', error);
+        });
+      }
+    });
   }
 });

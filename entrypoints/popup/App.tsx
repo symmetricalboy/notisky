@@ -1,30 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import './App.css';
 
-// --- PKCE Helper Functions ---
-async function generateRandomString(length: number): Promise<string> {
-  const charset = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
-  let result = '';
-  const randomValues = crypto.getRandomValues(new Uint8Array(length));
-  for (let i = 0; i < length; i++) {
-    result += charset[randomValues[i] % charset.length];
-  }
-  return result;
-}
-
-async function generateCodeChallenge(verifier: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(verifier);
-  const digest = await crypto.subtle.digest('SHA-256', data);
-  // Base64url encode
-  // @ts-ignore - Incorrect type inference for fromCharCode with spread
-  return btoa(String.fromCharCode.apply(null, new Uint8Array(digest)))
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=/g, '');
-}
-
-// --- Constants --- MUST MATCH SERVER CONFIG
+// --- Constants for Auth Server Flow ---
 const AUTH_SERVER_BASE_URL = 'https://notisky.symm.app'; // Updated URL
 // const AUTH_SERVER_BASE_URL = 'http://localhost:3001'; // For local testing
 const AUTH_INITIATE_ENDPOINT = `${AUTH_SERVER_BASE_URL}/api/auth/ext-auth`;

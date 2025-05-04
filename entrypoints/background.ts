@@ -24,6 +24,158 @@ let activeAgents: Record<string, BskyAgent> = {};
 // Store polling intervals
 const pollingIntervals: Record<string, number> = {};
 
+// Store for DPoP keys (in memory for this session)
+const dpopKeys: Record<string, CryptoKeyPair> = {};
+// Store for DPoP nonces per server
+let dpopServerNonce: string | null = null;
+
+// Get the correct global object for this context
+const globalCrypto = typeof self !== 'undefined' ? self.crypto : 
+                    typeof window !== 'undefined' ? window.crypto : 
+                    typeof globalThis !== 'undefined' ? globalThis.crypto : 
+                    crypto;
+
+// Function to generate a DPoP key pair for a session
+async function generateDpopKeyPair(): Promise<CryptoKeyPair> {
+  return await globalCrypto.subtle.generateKey(
+    {
+      name: 'ECDSA',
+      namedCurve: 'P-256', // ES256 required by Bluesky
+    },
+    true, // extractable
+    ['sign', 'verify']
+  );
+}
+
+// Function to create a DPoP JWT for a request
+async function createDpopProof(
+  url: string, 
+  method: string, 
+  keyPair: CryptoKeyPair,
+  nonce?: string
+): Promise<string> {
+  // Create header
+  const publicKey = await exportJWK(keyPair.publicKey);
+  const header = {
+    alg: 'ES256',
+    typ: 'dpop+jwt',
+    jwk: publicKey
+  };
+
+  // Create payload with unique jti
+  const jti = globalCrypto.randomUUID();
+  const now = Math.floor(Date.now() / 1000);
+  
+  const payload: any = {
+    jti: jti,
+    htm: method,
+    htu: url,
+    iat: now,
+    exp: now + 60, // Short expiry
+  };
+
+  // Add nonce if provided
+  if (nonce) {
+    payload.nonce = nonce;
+  }
+
+  // Create unsigned token
+  const encodedHeader = base64UrlEncode(JSON.stringify(header));
+  const encodedPayload = base64UrlEncode(JSON.stringify(payload));
+  const signingInput = `${encodedHeader}.${encodedPayload}`;
+  
+  // Sign the token
+  const encoder = new TextEncoder();
+  const data = encoder.encode(signingInput);
+  const signature = await globalCrypto.subtle.sign(
+    {
+      name: 'ECDSA',
+      hash: {name: 'SHA-256'},
+    },
+    keyPair.privateKey,
+    data
+  );
+
+  // Convert signature to base64url
+  const signatureBase64 = base64UrlEncode(
+    String.fromCharCode(...new Uint8Array(signature))
+  );
+
+  // Return the complete JWT
+  return `${signingInput}.${signatureBase64}`;
+}
+
+// Helper function to export a key to JWK format
+async function exportJWK(key: CryptoKey): Promise<any> {
+  const jwk = await globalCrypto.subtle.exportKey('jwk', key);
+  // Remove private key fields
+  delete jwk.d;
+  delete jwk.dp;
+  delete jwk.dq;
+  delete jwk.q;
+  delete jwk.qi;
+  return jwk;
+}
+
+// Helper function for base64url encoding
+function base64UrlEncode(str: string): string {
+  return btoa(str)
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+}
+
+// Update token exchange to include DPoP
+async function exchangeCodeForToken(code: string, verifier: string, state: string): Promise<any> {
+  console.log('[Background][OAUTH_CALLBACK] Performing token exchange...');
+  console.log(`[Background][OAUTH_CALLBACK] Using redirect_uri: ${SERVER_REDIRECT_URI}`);
+  console.log(`[Background][OAUTH_CALLBACK] Using client_id: ${CLIENT_METADATA_URL}`);
+  
+  // Make sure these parameters match exactly what was used in the authorization request
+  const tokenRequestBody = new URLSearchParams({
+    grant_type: 'authorization_code',
+    code: code,
+    redirect_uri: SERVER_REDIRECT_URI,
+    client_id: CLIENT_METADATA_URL,
+    code_verifier: verifier
+  });
+
+  try {
+    // For simplicity, we'll use the auth server to handle the token exchange
+    // This avoids WebCrypto API issues in service workers
+    const tokenExchangeUrl = `${AUTH_FINALIZE_URL_ORIGIN}/api/auth/token-exchange`;
+    
+    // Send the token request through our server which will add DPoP headers
+    const response = await fetch(tokenExchangeUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        code: code,
+        redirect_uri: SERVER_REDIRECT_URI,
+        client_id: CLIENT_METADATA_URL,
+        code_verifier: verifier,
+        state: state
+      })
+    });
+
+    if (response.status === 401) {
+      const nonce = response.headers.get('DPoP-Nonce');
+      if (nonce) {
+        console.log(`[Background][OAUTH_CALLBACK] Received DPoP nonce: ${nonce}, but server-side DPoP is required.`);
+        dpopServerNonce = nonce;
+        throw new Error('DPoP nonce required but server-side handling is not implemented.');
+      }
+    }
+    
+    return response;
+  } catch (error) {
+    console.error('[Background][OAUTH_CALLBACK] Token exchange error:', error);
+    throw error;
+  }
+}
+
 // Function to attempt resuming session or refreshing token for an account
 // NOTE: With OAuth, refreshing is handled by exchanging the refresh_token, not via resumeSession like password auth
 // This function needs adjustment or replacement if using OAuth refresh tokens.
@@ -37,9 +189,8 @@ async function activateOAuthSession(account: Account): Promise<BskyAgent | null>
     try {
         // Create agent first
         const agent = new BskyAgent({ 
-            service: BLUESKY_SERVICE, 
-            // Remove session from initial options
-         });
+            service: BLUESKY_SERVICE 
+        });
         
         // Then resume the session
         await agent.resumeSession({
@@ -75,7 +226,7 @@ function startPollingForAccount(account: Account, agent: BskyAgent): void {
   
   console.log(`Starting notification polling for ${account.handle} (${account.did})`);
   try {
-      // Call startNotificationPolling with just the account
+      // Call startNotificationPolling with the account
       const intervalId = startNotificationPolling(account);
       // Store the returned interval ID
       pollingIntervals[account.did] = intervalId;
@@ -296,21 +447,16 @@ export default defineBackground({
                 console.log(`[Background][OAUTH_CALLBACK] Using redirect_uri: ${SERVER_REDIRECT_URI}`);
                 console.log(`[Background][OAUTH_CALLBACK] Using client_id: ${CLIENT_METADATA_URL}`);
                 
+                // Make sure these parameters match exactly what was used in the authorization request
                 const tokenRequestBody = new URLSearchParams({
                   grant_type: 'authorization_code',
                   code: code,
-                  redirect_uri: SERVER_REDIRECT_URI, // Use SERVER URI
-                  client_id: CLIENT_METADATA_URL, // Use METADATA URL
+                  redirect_uri: SERVER_REDIRECT_URI,
+                  client_id: CLIENT_METADATA_URL,
                   code_verifier: verifier
                 });
 
-                const tokenResponse = await fetch(TOKEN_ENDPOINT, {
-                  method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                  },
-                  body: tokenRequestBody.toString()
-                });
+                const tokenResponse = await exchangeCodeForToken(code, verifier, state);
 
                 const responseBodyText = await tokenResponse.text();
                 let tokenData: any = {};

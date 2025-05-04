@@ -1,5 +1,4 @@
-import * as AtprotoAPI from '@atproto/api';
-const BskyAgent = AtprotoAPI.default.BskyAgent;
+import { BskyAgent } from '@atproto/api';
 
 export interface Account {
   did: string;
@@ -25,18 +24,56 @@ const CLIENT_ID_FOR_REFRESH = browser.runtime.id;
 export async function refreshToken(account: Account): Promise<Account | null> {
   console.log(`Attempting to refresh token for ${account.handle} (${account.did})`);
   try {
-    // Use the refresh token to get a new access token
-    const response = await fetch(TOKEN_ENDPOINT, {
+    // Get the DPoP functions from the background script
+    const background = (browser.extension.getBackgroundPage() as any);
+    const generateDpopKeyPair = background.generateDpopKeyPair;
+    const createDpopProof = background.createDpopProof;
+    const dpopServerNonce = background.dpopServerNonce;
+
+    // Prepare the refresh token request body
+    const refreshParams = new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: account.refreshJwt,
+      client_id: CLIENT_ID_FOR_REFRESH
+    });
+
+    // Generate a new DPoP key for this refresh
+    const keyPair = await generateDpopKeyPair();
+    
+    // Create the DPoP proof
+    const dpopProof = await createDpopProof(TOKEN_ENDPOINT, 'POST', keyPair, dpopServerNonce);
+
+    // Make the request with DPoP 
+    let response = await fetch(TOKEN_ENDPOINT, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/x-www-form-urlencoded'
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'DPoP': dpopProof
       },
-      body: new URLSearchParams({
-        grant_type: 'refresh_token',
-        refresh_token: account.refreshJwt,
-        // client_id: CLIENT_ID_FOR_REFRESH // Include if required by the OAuth server
-      }).toString()
+      body: refreshParams.toString()
     });
+
+    // Handle 401 with DPoP nonce
+    if (response.status === 401) {
+      const nonce = response.headers.get('DPoP-Nonce');
+      if (nonce) {
+        console.log(`Received DPoP nonce during refresh: ${nonce}, retrying...`);
+        // Update the nonce in background
+        background.dpopServerNonce = nonce;
+        // Create a new proof with the nonce
+        const newDpopProof = await createDpopProof(TOKEN_ENDPOINT, 'POST', keyPair, nonce);
+        
+        // Retry the request
+        response = await fetch(TOKEN_ENDPOINT, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'DPoP': newDpopProof
+          },
+          body: refreshParams.toString()
+        });
+      }
+    }
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({ error: 'Unknown refresh error', description: response.statusText }));
@@ -167,7 +204,7 @@ export async function tokenResponseToAccount(tokenData: any): Promise<Account | 
       handle: profile.handle, // Get handle from profile 
       refreshJwt: tokenData.refresh_token, // Store the tokens from the response
       accessJwt: tokenData.access_token,  
-      email: profile.email // Optional email from profile
+      email: profile.email as string | undefined // Cast to the correct type
     };
     console.log(`tokenResponseToAccount: Account created/updated for handle: ${account.handle}`);
     return account;

@@ -5,10 +5,9 @@ import { Account } from '../../src/services/auth';
 import { BLUESKY_SERVICE } from '../../src/services/atproto-oauth';
 
 // --- OAuth Configuration ---
-// Corrected to match background.ts values
-const WEB_CALLBACK_URL = 'https://notisky.symm.app/api/auth/extension-callback';
-const CLIENT_METADATA_URL = 'https://notisky.symm.app/client-metadata/client.json';
-const AUTHORIZATION_ENDPOINT = `${BLUESKY_SERVICE}/oauth/authorize`; // Use standard authorize endpoint
+// Use the client metadata URL hosted by the server
+const CLIENT_METADATA_URL = 'https://notisky.symm.app/client-metadata/client.json'; 
+const AUTHORIZATION_ENDPOINT = `${BLUESKY_SERVICE}/oauth/authorize`; 
 
 // PKCE Helper functions
 async function generateCodeVerifier(): Promise<string> {
@@ -31,21 +30,66 @@ async function generateCodeChallenge(verifier: string): Promise<string> {
 
 // --- Login Component ---
 function Login() {
-  const [handle, setHandle] = useState('');
+  const [handle, setHandle] = useState(''); // Keep for potential future use?
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [info, setInfo] = useState<string | null>(null);
+  const [extensionRedirectUri, setExtensionRedirectUri] = useState<string | null>(null);
+
+  // Get the extension's redirect URI on component mount
+  useEffect(() => {
+    try {
+      // WXT might provide a helper, but browser.identity is standard
+      const redirectUri = browser.identity.getRedirectURL(); 
+      console.log('[Login] Determined Extension Redirect URI:', redirectUri);
+      if (!redirectUri) {
+          throw new Error('Could not determine extension redirect URI.');
+      }
+      setExtensionRedirectUri(redirectUri);
+    } catch (err: any) {
+       console.error('[Login] Error getting redirect URI:', err);
+       setError(`Initialization failed: ${err.message}`);
+    }
+  }, []);
+
+  // Listener for completion message from background script
+  useEffect(() => {
+    const handleMessage = (message: any, sender: browser.runtime.MessageSender) => {
+       if (sender.id !== browser.runtime.id) return; // Only listen to self
+
+       if (message.type === 'OAUTH_COMPLETE') { // Listen for the final outcome
+          console.log('[Login] Received OAUTH_COMPLETE from background:', message);
+          setLoading(false);
+          if (message.success) {
+            setInfo('Login successful! You can close this window.');
+            setError(null);
+            setTimeout(() => window.close(), 1500); 
+          } else {
+            setError(`Login failed: ${message.error || 'Unknown error from background.'}`);
+            setInfo(null);
+          }
+       }
+    };
+    browser.runtime.onMessage.addListener(handleMessage);
+    return () => browser.runtime.onMessage.removeListener(handleMessage);
+  }, []);
+
 
   // Handle initiating the OAuth sign-in flow using launchWebAuthFlow
   const handleOAuthLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    console.log('[launchWebAuthFlow] Started');
-    // Note: Handle input is not directly used in this flow, but kept for consistency
+    console.log('[Login Flow] Started');
+    
+    if (!extensionRedirectUri) {
+        setError('Error: Extension Redirect URI not available.');
+        return;
+    }
+
     setError(null);
     setInfo('Preparing secure login...');
     setLoading(true);
-    let generatedState = null; // Keep state for potential cleanup
-    let verifierStorageKey = null; // Keep key for potential cleanup
+    let generatedState = null; 
+    let verifierStorageKey = null; 
 
     try {
         const state = crypto.randomUUID();
@@ -54,93 +98,90 @@ function Login() {
         const codeChallenge = await generateCodeChallenge(codeVerifier);
         const codeChallengeMethod = 'S256';
 
-        // Store verifier in browser.storage.session instead of localStorage
+        // Store verifier in session storage (accessible by background)
         verifierStorageKey = `pkce_${state}`;
         await browser.storage.session.set({ [verifierStorageKey]: codeVerifier });
-        console.log('[launchWebAuthFlow] Stored PKCE verifier in session storage for state:', state);
+        console.log('[Login Flow] Stored PKCE verifier in session storage for state:', state);
 
         // Define scopes needed
         const scope = 'atproto transition:generic transition:chat.bsky'; // Match client.json
 
         const authParams = new URLSearchParams({
             response_type: 'code',
-            client_id: CLIENT_METADATA_URL, // Use hosted metadata URL as client_id
-            redirect_uri: WEB_CALLBACK_URL, // Use hosted callback URL
+            client_id: CLIENT_METADATA_URL, // Use the hosted metadata URL
+            redirect_uri: extensionRedirectUri, // Use the EXTENSION'S redirect URI
             scope: scope,
             state: state,
             code_challenge: codeChallenge,
             code_challenge_method: codeChallengeMethod,
         });
         const authorizationUrl = `${AUTHORIZATION_ENDPOINT}?${authParams.toString()}`;
-        console.log('[launchWebAuthFlow] Constructed Auth URL:', authorizationUrl);
+        console.log('[Login Flow] Constructed Bluesky Auth URL:', authorizationUrl);
 
         setInfo('Waiting for Bluesky authorization...');
-        console.log('[launchWebAuthFlow] Calling browser.identity.launchWebAuthFlow...');
+        console.log('[Login Flow] Calling browser.identity.launchWebAuthFlow...');
         
+        // Use launchWebAuthFlow - it will handle the redirect back to the extension URI
         const resultUrl = await browser.identity.launchWebAuthFlow({
             url: authorizationUrl,
             interactive: true
         });
 
-        console.log('[launchWebAuthFlow] Call finished. Result URL:', resultUrl);
+        console.log('[Login Flow] launchWebAuthFlow finished. Result URL:', resultUrl);
 
-        // --- Process Result URL --- 
+        // --- Process Result URL (captured by launchWebAuthFlow) --- 
         if (!resultUrl) {
-            console.log('[launchWebAuthFlow] Flow cancelled by user (no result URL).');
+            console.log('[Login Flow] Flow cancelled by user (no result URL).');
             throw new Error('Authentication flow was cancelled.');
         }
 
         const url = new URL(resultUrl);
-        // Check query parameters, not hash fragment
         const code = url.searchParams.get('code');
         const returnedState = url.searchParams.get('state');
         const errorCode = url.searchParams.get('error');
         const errorDesc = url.searchParams.get('error_description');
 
         if (errorCode) {
-             console.error('[launchWebAuthFlow] OAuth Error in callback URL:', errorCode, errorDesc);
+             console.error('[Login Flow] OAuth Error in callback URL:', errorCode, errorDesc);
+             // Clean up verifier before throwing
+             if (verifierStorageKey) await browser.storage.session.remove(verifierStorageKey);
              throw new Error(`OAuth Error: ${errorDesc || errorCode}`);
         }
         if (!code) {
-            console.error('[launchWebAuthFlow] Code not found in callback URL parameters:', url.search);
+            console.error('[Login Flow] Code not found in callback URL:', resultUrl);
+             if (verifierStorageKey) await browser.storage.session.remove(verifierStorageKey);
             throw new Error('Authorization code not found in callback URL.');
         }
         if (returnedState !== state) {
              if (verifierStorageKey) await browser.storage.session.remove(verifierStorageKey); 
-             console.error('[launchWebAuthFlow] State mismatch! Expected:', state, 'Received:', returnedState);
+             console.error('[Login Flow] State mismatch! Expected:', state, 'Received:', returnedState);
              throw new Error('OAuth state mismatch. Security check failed.');
         }
 
-        // --- Send to Background --- 
-        setInfo('Authentication approved! Finalizing login...');
-        console.log('[launchWebAuthFlow] Sending code and verifier key to background...');
-        const exchangeResponse = await browser.runtime.sendMessage({
-            type: 'EXCHANGE_OAUTH_CODE',
-            data: { code, state: returnedState, verifierStorageKey: verifierStorageKey }
+        // --- Send Code to Background for Exchange --- 
+        setInfo('Authentication approved! Finalizing login with background service...');
+        console.log('[Login Flow] Sending code and state to background for token exchange...');
+        // Background will use the state to find the verifier in session storage
+        await browser.runtime.sendMessage({
+            type: 'EXCHANGE_OAUTH_CODE', 
+            data: { code, state: returnedState } // Send code and state
         });
-
-        // --- Handle Background Response --- 
-        console.log('[launchWebAuthFlow] Received response from background:', exchangeResponse);
-        if (exchangeResponse && exchangeResponse.success) {
-            console.log('Background reported successful exchange.');
-            setInfo('Login successful!');
-            // Verifier is cleaned up by background script
-            verifierStorageKey = null; // Prevent cleanup here
-            setTimeout(() => window.close(), 1500);
-        } else {
-             console.error('[launchWebAuthFlow] Background reported error:', exchangeResponse?.error);
-             throw new Error(exchangeResponse?.error || 'Token exchange failed in background.');
-        }
+        // Background script is now responsible for token exchange and cleanup of PKCE state.
+        // We wait for the 'OAUTH_COMPLETE' message (handled by useEffect listener).
+        console.log('[Login Flow] Waiting for OAUTH_COMPLETE message from background...');
 
     } catch (err: any) {
-      console.error('[launchWebAuthFlow] Overall flow error:', err);
-      if (err.message?.includes('cancelled') || err.message?.includes('closed by the user')) {
-           setError('Login cancelled.');
+      console.error('[Login Flow] Overall flow error:', err);
+       // Ensure verifier is cleaned up on error IF it was stored and not yet handled by background
+      if (verifierStorageKey && !(err.message?.includes('OAuth Error') || err.message?.includes('Code not found') || err.message?.includes('State mismatch'))) {
+            // Attempt cleanup if error happened before sending to background or if background failed unexpectedly
+            try { await browser.storage.session.remove(verifierStorageKey); } catch (e) { console.warn('Error during cleanup:', e)}
+      }
+      if (err.message?.includes('cancelled') || err.message?.includes('closed by the user') || err.message?.includes('Invalid redirect URI')) {
+           setError(`Login cancelled or failed: ${err.message}`);
       } else {
            setError(`Login failed: ${err.message || 'Unknown error'}`);
       }
-      // Clean up verifier if state was generated and error occurred
-      if (verifierStorageKey) await browser.storage.session.remove(verifierStorageKey);
       setLoading(false);
       setInfo(null);
     }
@@ -157,31 +198,18 @@ function Login() {
       <form onSubmit={handleOAuthLogin} className="login-form">
         {error && <div className="error-message">{error}</div>}
         {info && !error && <div className="info-message">{info}</div>}
-        
-        {/* Optional: Keep handle input disabled or remove it */}
-        {/* <div className="form-group">
-          <label htmlFor="handle">Bluesky Handle</label>
-          <input
-            type="text"
-            id="handle"
-            value={handle}
-            onChange={(e) => setHandle(e.target.value)}
-            placeholder="yourname.bsky.social"
-            disabled={true} // Disable if kept
-            autoCapitalize="none"
-            autoCorrect="false"
-          />
-        </div> */}
-                
-        <button type="submit" disabled={loading}>
-          {loading ? 'Processing...' : 'Sign in with Bluesky'}
+                        
+        <button type="submit" disabled={loading || !extensionRedirectUri}>
+          {loading ? 'Processing...' : (extensionRedirectUri ? 'Sign in with Bluesky' : 'Initializing...')}
         </button>
+        {!extensionRedirectUri && !error && <div className="info-message">Determining redirect URI...</div>}
       </form>
       
       <div className="login-footer">
         <p>
            A new window will open to authorize Notisky with Bluesky.
         </p>
+         {extensionRedirectUri && <p style={{fontSize: '0.8em', color: '#aaa', marginTop: '10px'}}>Redirect URI: {extensionRedirectUri}</p>}
       </div>
     </div>
   );

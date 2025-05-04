@@ -99,9 +99,11 @@ function Login() {
 
       // 4. Open the Auth Server URL in a new tab/window
       setInfo('Redirecting via authentication server...');
-      console.log('[Login Page - Auth Server Flow] Opening Auth Server URL...');
+      console.log('[Login Page - Auth Server Flow] Opening Auth Server URL using browser.tabs.create...');
       
-      // Use window.open for potentially better user experience than replacing the current tab
+      // Use browser.tabs.create instead of window.open
+      await browser.tabs.create({ url: authServerInitiateFullUrl, active: true });
+      /* 
       const authWindow = window.open(authServerInitiateFullUrl, '_blank', 'width=600,height=700,noopener,noreferrer');
       if (!authWindow) {
           // Fallback or error if window opening failed (e.g., popup blocker)
@@ -111,8 +113,9 @@ function Login() {
           throw new Error('Failed to open authentication window. Please check your popup blocker settings.');
           // Alternative: await browser.tabs.create({ url: authServerInitiateFullUrl, active: true });
       }
+      */
 
-      console.log('[Login Page - Auth Server Flow] Auth window opened. Waiting for OAUTH_COMPLETE message from background...');
+      console.log('[Login Page - Auth Server Flow] Auth tab should be opening. Waiting for OAUTH_COMPLETE message from background...');
       // Login page now waits passively for the OAUTH_COMPLETE message from the background via the useEffect listener
       // It doesn't interact with launchWebAuthFlow or parse URLs itself anymore.
 

@@ -37,9 +37,14 @@ export default defineConfig({
     content_scripts: [
         {
             matches: ["*://notisky.symm.app/auth-finalize.html*"],
-            js: ["public/auth-finalize-cs.js"],
+            js: ["auth-finalize-cs.js"],
             run_at: "document_idle"
         }
     ]
+  },
+  // Add copy config to copy the content script to the output directory
+  outDir: '.output',
+  copyOnce: {
+    './public/auth-finalize-cs.js': 'auth-finalize-cs.js',
   },
 }); 

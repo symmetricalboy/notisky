@@ -41,10 +41,16 @@ function processCallback() {
       
       // Send error to background script
       // Use browser namespace for WebExtension compatibility (including Firefox)
-      browser.runtime.sendMessage({
-        type: 'OAUTH_CALLBACK',
-        data: { error, error_description: errorDescription }
-      });
+      if (browser && browser.runtime && browser.runtime.sendMessage) {
+        browser.runtime.sendMessage({
+          type: 'OAUTH_CALLBACK',
+          data: { error, error_description: errorDescription }
+        }).catch(function(err) {
+          console.error('[auth-finalize-cs] Error sending error message:', err);
+        });
+      } else {
+        console.error('[auth-finalize-cs] Browser runtime API not available');
+      }
       return;
     }
     
@@ -65,27 +71,79 @@ function processCallback() {
       messageEl.textContent = 'Authentication successful! Processing details...';
     }
     
-    // Send the auth data to background script
-    // Use browser namespace for WebExtension compatibility
-    browser.runtime.sendMessage({
-      type: 'OAUTH_CALLBACK',
-      data: { code, state }
-    }).then(function(response) {
-      console.log('[auth-finalize-cs] Background script response:', response);
-      
-      if (response && response.success) {
-        updateUI(true, 'Successfully authenticated! You can close this window.');
-        // Auto-close after a delay
-        setTimeout(function() {
-          window.close();
-        }, 3000);
-      } else {
-        updateUI(false, (response && response.error) || 'Unknown error during authentication process');
-      }
-    }).catch(function(error) {
-      console.error('[auth-finalize-cs] Error sending message:', error);
-      updateUI(false, 'Error communicating with extension');
-    });
+    // Send the auth data to background script for token retrieval
+    if (browser && browser.runtime && browser.runtime.sendMessage) {
+      // Let extension know we received the code and state, extension will respond with the verifier
+      browser.runtime.sendMessage({
+        type: 'GET_CODE_VERIFIER',
+        data: { state: state }
+      }).then(function(response) {
+        if (!response || !response.verifier) {
+          console.error('[auth-finalize-cs] Failed to get verifier from extension');
+          updateUI(false, 'Authentication failed: Could not retrieve verifier');
+          return;
+        }
+        
+        console.log('[auth-finalize-cs] Retrieved verifier from extension, sending to auth server...');
+        
+        // Now send the code, state, and verifier to the auth server's token exchange endpoint
+        fetch('https://notisky.symm.app/api/auth/token-exchange', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            code: code,
+            state: state,
+            code_verifier: response.verifier,
+            redirect_uri: 'https://notisky.symm.app/api/auth/extension-callback',
+            client_id: 'https://notisky.symm.app/client-metadata/client.json'
+          })
+        })
+        .then(function(fetchResponse) {
+          return fetchResponse.json();
+        })
+        .then(function(tokenData) {
+          if (tokenData.error) {
+            console.error('[auth-finalize-cs] Token exchange failed:', tokenData.error);
+            updateUI(false, `Authentication failed: ${tokenData.error_description || tokenData.error}`);
+            return;
+          }
+          
+          console.log('[auth-finalize-cs] Token exchange successful, sending tokens to extension');
+          // Now send the tokens to the extension
+          browser.runtime.sendMessage({
+            type: 'OAUTH_TOKEN_RECEIVED',
+            data: tokenData
+          }).then(function(finalResponse) {
+            console.log('[auth-finalize-cs] Extension processed tokens:', finalResponse);
+            
+            if (finalResponse && finalResponse.success) {
+              updateUI(true, 'Successfully authenticated! You can close this window.');
+              // Auto-close after a delay
+              setTimeout(function() {
+                window.close();
+              }, 3000);
+            } else {
+              updateUI(false, (finalResponse && finalResponse.error) || 'Unknown error saving authentication');
+            }
+          }).catch(function(err) {
+            console.error('[auth-finalize-cs] Error sending tokens to extension:', err);
+            updateUI(false, 'Error communicating with extension');
+          });
+        })
+        .catch(function(err) {
+          console.error('[auth-finalize-cs] Error during token exchange with auth server:', err);
+          updateUI(false, 'Error during token exchange with server');
+        });
+      }).catch(function(error) {
+        console.error('[auth-finalize-cs] Error retrieving verifier:', error);
+        updateUI(false, 'Error communicating with extension');
+      });
+    } else {
+      console.error('[auth-finalize-cs] Browser runtime API not available');
+      updateUI(false, 'Browser API not available. Please make sure extension permissions are granted.');
+    }
   } catch (err) {
     console.error('[auth-finalize-cs] Error in content script:', err);
   }

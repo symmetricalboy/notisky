@@ -1,6 +1,9 @@
 // auth-finalize-cs.js
 // This is a pure JavaScript content script that runs on the auth-finalize.html page
 
+// Define browser namespace for WebExtension compatibility
+var browser = window.browser || window.chrome;
+
 console.log('[auth-finalize-cs] Content script loaded');
 
 // Process the OAuth callback parameters and communicate with background script
@@ -37,7 +40,8 @@ function processCallback() {
       updateUI(false, `Authentication failed: ${errorDescription || error}`);
       
       // Send error to background script
-      chrome.runtime.sendMessage({
+      // Use browser namespace for WebExtension compatibility (including Firefox)
+      browser.runtime.sendMessage({
         type: 'OAUTH_CALLBACK',
         data: { error, error_description: errorDescription }
       });
@@ -62,10 +66,11 @@ function processCallback() {
     }
     
     // Send the auth data to background script
-    chrome.runtime.sendMessage({
+    // Use browser namespace for WebExtension compatibility
+    browser.runtime.sendMessage({
       type: 'OAUTH_CALLBACK',
       data: { code, state }
-    }, function(response) {
+    }).then(function(response) {
       console.log('[auth-finalize-cs] Background script response:', response);
       
       if (response && response.success) {
@@ -77,6 +82,9 @@ function processCallback() {
       } else {
         updateUI(false, (response && response.error) || 'Unknown error during authentication process');
       }
+    }).catch(function(error) {
+      console.error('[auth-finalize-cs] Error sending message:', error);
+      updateUI(false, 'Error communicating with extension');
     });
   } catch (err) {
     console.error('[auth-finalize-cs] Error in content script:', err);

@@ -158,7 +158,6 @@ function injectedAuthFinalizeLogic() {
       if (error) {
         console.error('[Injected Script] Error in URL:', error, errorDescription);
         setStatus(`Error: ${error} - ${errorDescription || 'Please try again.'}`, true);
-         // Send error details back to background?
         try {
             const runtime = typeof browser !== 'undefined' ? browser.runtime : chrome.runtime;
             await runtime.sendMessage({ type: 'OAUTH_CALLBACK', data: { error, error_description: errorDescription, state } });
@@ -176,7 +175,7 @@ function injectedAuthFinalizeLogic() {
       const runtime = typeof browser !== 'undefined' ? browser.runtime : chrome.runtime;
       const response = await runtime.sendMessage({
         type: 'OAUTH_CALLBACK',
-        data: { code, state } // Send code and original state
+        data: { code, state } 
       });
 
       console.log('[Injected Script] Background response:', response);
@@ -185,14 +184,9 @@ function injectedAuthFinalizeLogic() {
       } else {
           setStatus(`Error during background processing: ${response?.error || 'Unknown error'}`, true);
       }
-      
-      // Maybe don't close automatically, let background message control it?
-      // setTimeout(() => { ... }, 3000);
-
     } catch (err: any) {
       console.error('[Injected Script] Error:', err);
       setStatus('Error: ' + (err.message || String(err)), true);
-      // Send error details back to background?
       try {
           const runtime = typeof browser !== 'undefined' ? browser.runtime : chrome.runtime;
           await runtime.sendMessage({ type: 'OAUTH_CALLBACK', data: { error: 'script_error', error_description: err.message, state: new URLSearchParams(window.location.search).get('state') } });
@@ -419,33 +413,46 @@ export default defineBackground({
       return false; 
     });
 
-    // --- REINSTATE tabs.onUpdated listener for injection ---
+    // Notification click handler (keep as is)
+    browser.notifications.onClicked.addListener((notificationId) => {
+      console.log(`Notification clicked: ${notificationId}`);
+      browser.tabs.create({ url: 'https://bsky.app/notifications' });
+      browser.notifications.clear(notificationId);
+    });
+
+    // --- REINSTATE tabs.onUpdated listener for injection --- 
     browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+        // Add log to see if listener fires at all
+        // console.log(`[onUpdated] tabId: ${tabId}, status: ${changeInfo.status}, url: ${tab.url}`);
+        
         if (changeInfo.status === 'complete' && tab.url) {
+             // Add log to see if status is complete and URL is present
+            // console.log(`[onUpdated] Status complete for ${tab.url}`);
             try {
                 const url = new URL(tab.url);
-                // Check if it's the finalize URL hosted by the auth server
                 if (url.origin === AUTH_FINALIZE_URL_ORIGIN && url.pathname === AUTH_FINALIZE_URL_PATH) {
-                    console.log(`[Background] Detected auth finalize page loaded: ${tab.url}`);
+                    console.log(`[Background][onUpdated] Detected auth finalize page loaded: ${tab.url}`);
                     
-                    // Check scripting permission for the *server's* origin
                     const hasPermission = await browser.permissions.contains({ origins: [url.origin + '/*'] });
                     if (!hasPermission) {
-                       console.error(`[Background] Missing host permission for ${url.origin} needed for script injection.`);
-                       // TODO: Maybe notify user or request permission?
+                       console.error(`[Background][onUpdated] Missing host permission for ${url.origin} needed for script injection.`);
                        return; 
                     }
 
-                    console.log(`[Background] Injecting script into ${tab.url}`);
+                    console.log(`[Background][onUpdated] Attempting script injection into tab ${tabId}...`);
                     await browser.scripting.executeScript({
                         target: { tabId: tabId },
-                        func: injectedAuthFinalizeLogic, 
+                        func: injectedAuthFinalizeLogic, // Ensure this function is defined above
                     });
-                    console.log('[Background] Injected auth finalize script.');
+                    console.log('[Background][onUpdated] Injected auth finalize script successfully.');
+                } else {
+                    // console.log(`[onUpdated] URL did not match: ${tab.url}`);
                 }
             } catch (error: any) {
-                if (!(error instanceof TypeError && error.message.includes('Invalid URL'))) {
-                   console.error('[Background] Error in tabs.onUpdated listener:', error);
+                if (error instanceof TypeError && error.message.includes('Invalid URL')) {
+                    // Ignore errors for special URLs like about:blank
+                } else {
+                   console.error('[Background][onUpdated] Error processing tab update:', error);
                 }
             }
         }

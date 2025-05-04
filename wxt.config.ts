@@ -1,32 +1,39 @@
 import { defineConfig } from 'wxt';
+// import react from '@vitejs/plugin-react'; // Module handles React
 
 // See https://wxt.dev/api/config.html
 export default defineConfig({
   modules: ['@wxt-dev/module-react'],
+  
   manifest: {
     name: 'Notisky',
-    description: 'Real-time notifications for Bluesky',
+    description: 'Get real-time Bluesky notifications in your browser.',
+    version: '0.1.0',
     permissions: [
-      'storage',
-      'notifications',
-      'alarms',
-      'identity',
-      'tabs',
-      'scripting'
+        "storage", 
+        "notifications", 
+        "alarms",
+        "identity", 
+        "scripting" // Ensure scripting permission is present
     ],
     host_permissions: [
-      '*://*.bsky.app/*',
-      '*://*.bsky.social/*',
-      '*://*.notisky.symm.app/*'
+        "*://*.bsky.social/*", 
+        "*://notisky.symm.app/*" // Ensure host permission is present
     ],
-    web_accessible_resources: [
-      {
-        resources: ['assets/*', 'public/*', 'client-metadata/*'],
-        matches: ['*://*.bsky.app/*', '*://*.bsky.social/*']
-      }
-    ],
-    content_security_policy: {
-      extension_pages: "script-src 'self'; object-src 'self'; connect-src 'self' https://bsky.social https://*.bsky.social https://notisky.symm.app;",
+    background: {
+        service_worker: "entrypoints/background.ts"
     },
+    action: {
+        default_popup: "entrypoints/popup/index.html"
+    },
+    options_page: "entrypoints/options/index.html",
+    // Remove content_scripts section entirely
+    // content_scripts: [
+    //     {
+    //         matches: ["*://notisky.symm.app/auth-finalize.html*"],
+    //         js: ["entrypoints/auth-finalize-cs.js"],
+    //         run_at: "document_idle"
+    //     }
+    // ]
   },
 }); 

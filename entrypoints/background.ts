@@ -368,40 +368,85 @@ export default defineBackground({
         // Process the token data similar to how we would have after a direct token exchange
         (async () => {
           try {
-            // Create temporary agent to get full profile info if needed
-            const tempAgent = new BskyAgent({ service: BLUESKY_SERVICE });
-            await tempAgent.resumeSession({
-              accessJwt: tokenData.access_token, 
-              refreshJwt: tokenData.refresh_token, 
-              did: tokenData.did, 
-              handle: tokenData.handle 
-            });
+            // Create a direct session object without using BskyAgent's resumeSession initially
+            // This bypasses the agent's scope validation which is causing the "Bad token scope" error
+            const sessionData = {
+              did: tokenData.did,
+              handle: tokenData.handle,
+              email: tokenData.email,
+              accessJwt: tokenData.access_token,
+              refreshJwt: tokenData.refresh_token
+            };
             
-            // Ensure we have all required profile information
-            if (!tempAgent.session?.did || !tempAgent.session?.handle) {
-              console.log('[Background][OAUTH_TOKEN_RECEIVED] Fetching profile details using new token...');
-              const profileRes = await tempAgent.api.app.bsky.actor.getProfile({ actor: tokenData.did || 'me' }); 
-              if (!profileRes.data.did || !profileRes.data.handle) {
-                throw new Error('Failed to retrieve profile information (DID/Handle) after token exchange.');
+            // If we don't have the DID or handle yet, we need to fetch it
+            if (!sessionData.did || !sessionData.handle) {
+              console.log('[Background][OAUTH_TOKEN_RECEIVED] Fetching profile info with raw token...');
+              
+              // Create temporary agent just for the API call
+              const tempAgent = new BskyAgent({ 
+                service: BLUESKY_SERVICE 
+              });
+              
+              // Set the access token directly without using resumeSession
+              tempAgent.session = {
+                did: '',
+                handle: '',
+                accessJwt: tokenData.access_token,
+                refreshJwt: tokenData.refresh_token,
+              };
+              
+              // Now use the agent to fetch profile info
+              try {
+                const profileRes = await tempAgent.api.app.bsky.actor.getProfile({ actor: 'me' });
+                if (profileRes.success && profileRes.data) {
+                  sessionData.did = profileRes.data.did;
+                  sessionData.handle = profileRes.data.handle;
+                  console.log(`[Background][OAUTH_TOKEN_RECEIVED] Retrieved profile: ${sessionData.handle} (${sessionData.did})`);
+                } else {
+                  throw new Error('Failed to fetch profile data');
+                }
+              } catch (profileErr) {
+                console.error('[Background][OAUTH_TOKEN_RECEIVED] Error fetching profile:', profileErr);
+                throw new Error('Failed to retrieve user profile with the token');
               }
-              tokenData.did = profileRes.data.did;
-              tokenData.handle = profileRes.data.handle;
             }
             
-            // Convert token data to account structure and save
-            const accountData = await tokenResponseToAccount(tokenData);
-            if (!accountData) {
-              throw new Error('Failed to process token data into account structure.');
-            }
+            // At this point we should have all the user info - create an account object
+            const accountData = {
+              did: sessionData.did,
+              handle: sessionData.handle,
+              email: sessionData.email || '',
+              accessJwt: sessionData.accessJwt,
+              refreshJwt: sessionData.refreshJwt,
+              provider: 'bsky',
+              displayName: '', // Will be populated later if needed
+              avatarUrl: '',   // Will be populated later if needed
+            };
             
             console.log(`[Background][OAUTH_TOKEN_RECEIVED] Saving account: ${accountData.handle} (${accountData.did})`);
             await saveAccount(accountData);
             
-            // Activate the session and start polling
-            const agent = await activateOAuthSession(accountData);
-            if (!agent) {
-              throw new Error('Failed to activate agent session after receiving tokens.');
+            // Now create an agent with our session data
+            const agent = new BskyAgent({ 
+              service: BLUESKY_SERVICE 
+            });
+            
+            // Set the session directly instead of using resumeSession to avoid scope validation
+            agent.session = sessionData;
+            
+            // Verify the token works by making a test API call
+            try {
+              const testRes = await agent.api.app.bsky.feed.getTimeline({ limit: 1 });
+              if (!testRes.success) {
+                throw new Error('Token validation failed: could not access timeline');
+              }
+              console.log('[Background][OAUTH_TOKEN_RECEIVED] Verified token works with API');
+            } catch (testErr) {
+              console.error('[Background][OAUTH_TOKEN_RECEIVED] Token validation failed:', testErr);
+              throw new Error('Could not validate the token with Bluesky API');
             }
+            
+            // Store the agent and start polling
             activeAgents[accountData.did] = agent;
             startPollingForAccount(accountData, agent);
             

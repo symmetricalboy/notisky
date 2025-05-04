@@ -33,13 +33,13 @@ export default defineConfig({
         default_popup: "entrypoints/popup/index.html"
     },
     options_page: "entrypoints/options/index.html",
-    // Remove content_scripts section entirely
-    // content_scripts: [
-    //     {
-    //         matches: ["*://notisky.symm.app/auth-finalize.html*"],
-    //         js: ["entrypoints/auth-finalize-cs.js"],
-    //         run_at: "document_idle"
-    //     }
-    // ]
+    // Enable content scripts for auth finalization
+    content_scripts: [
+        {
+            matches: ["*://notisky.symm.app/auth-finalize.html*"],
+            js: ["public/auth-finalize-cs.js"],
+            run_at: "document_idle"
+        }
+    ]
   },
 }); 

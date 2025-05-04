@@ -25,13 +25,12 @@ async function generateCodeChallenge(verifier: string): Promise<string> {
 
 // --- Constants ---
 // URL for the auth server endpoint that starts the flow
-const AUTH_SERVER_INITIATE_URL = 'https://notisky.symm.app/api/auth/start-extension-flow';
+const AUTH_SERVER_INITIATE_URL = 'https://notisky.symm.app/api/auth/ext-auth';
 // Client ID remains the same
 const CLIENT_ID = 'https://notisky.symm.app/client-metadata/client.json'; 
 
 // --- Login Component ---
 function Login() {
-  const [handle, setHandle] = useState(''); // Keep for consistency?
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [info, setInfo] = useState<string | null>(null);
@@ -58,7 +57,7 @@ function Login() {
     return () => browser.runtime.onMessage.removeListener(handleMessage);
   }, []);
   
-  // Reverted: Initiate OAuth flow via the Auth Server
+  // Initiate OAuth flow via the Auth Server
   const handleLoginViaAuthServer = async (e: React.FormEvent) => {
     e.preventDefault();
     console.log('[Login Page - Auth Server Flow] Started');
@@ -75,7 +74,7 @@ function Login() {
       const codeVerifier = await generateCodeVerifier();
       const codeChallenge = await generateCodeChallenge(codeVerifier);
       console.log(`[Login Page - Auth Server Flow] State: ${state.substring(0, 5)}...`);
-      console.log(`[Login Page - Auth Server Flow] Challenge: ${codeChallenge}`);
+      console.log(`[Login Page - Auth Server Flow] Challenge: ${codeChallenge.substring(0, 10)}...`);
 
       if (!CLIENT_ID) {
           throw new Error("Client ID is not set.");
@@ -91,8 +90,7 @@ function Login() {
         client_id: CLIENT_ID, // Pass client ID to auth server
         state: state,
         code_challenge: codeChallenge,
-        code_challenge_method: 'S256', // Pass method too
-        // The auth server will add its own redirect_uri when calling Bluesky
+        code_challenge_method: 'S256',
       });
       const authServerInitiateFullUrl = `${AUTH_SERVER_INITIATE_URL}?${authServerUrlParams.toString()}`;
       console.log('[Login Page - Auth Server Flow] Constructed Auth Server Initiate URL:', authServerInitiateFullUrl);
@@ -103,22 +101,9 @@ function Login() {
       
       // Use browser.tabs.create instead of window.open
       await browser.tabs.create({ url: authServerInitiateFullUrl, active: true });
-      /* 
-      const authWindow = window.open(authServerInitiateFullUrl, '_blank', 'width=600,height=700,noopener,noreferrer');
-      if (!authWindow) {
-          // Fallback or error if window opening failed (e.g., popup blocker)
-          console.warn('[Login Page - Auth Server Flow] window.open failed, falling back to browser.tabs.create');
-          // Clear verifier if we can't even open the window
-          if (verifierStorageKey) { await browser.storage.session.remove(verifierStorageKey); }
-          throw new Error('Failed to open authentication window. Please check your popup blocker settings.');
-          // Alternative: await browser.tabs.create({ url: authServerInitiateFullUrl, active: true });
-      }
-      */
 
       console.log('[Login Page - Auth Server Flow] Auth tab should be opening. Waiting for OAUTH_COMPLETE message from background...');
       // Login page now waits passively for the OAUTH_COMPLETE message from the background via the useEffect listener
-      // It doesn't interact with launchWebAuthFlow or parse URLs itself anymore.
-
     } catch (err: any) {
       console.error('[Login Page - Auth Server Flow] Error during login initiation:', err);
       // Attempt to clean up stored verifier on error

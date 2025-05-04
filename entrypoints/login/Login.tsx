@@ -5,9 +5,9 @@ import { Account } from '../../src/services/auth';
 import { BLUESKY_SERVICE } from '../../src/services/atproto-oauth';
 
 // --- OAuth Configuration ---
-// Hosted callback URL for launchWebAuthFlow
-const WEB_CALLBACK_URL = 'https://notisky.symm.app/public/oauth-callback.html';
-const CLIENT_METADATA_URL = 'https://notisky.symm.app/public/client-metadata/client.json'; // Hosted metadata URL
+// Corrected to match background.ts values
+const WEB_CALLBACK_URL = 'https://notisky.symm.app/api/auth/extension-callback';
+const CLIENT_METADATA_URL = 'https://notisky.symm.app/client-metadata/client.json';
 const AUTHORIZATION_ENDPOINT = `${BLUESKY_SERVICE}/oauth/authorize`; // Use standard authorize endpoint
 
 // PKCE Helper functions
@@ -54,10 +54,10 @@ function Login() {
         const codeChallenge = await generateCodeChallenge(codeVerifier);
         const codeChallengeMethod = 'S256';
 
-        // Store verifier temporarily using state as key
-        verifierStorageKey = `oauth_pkce_verifier_${state}`;
-        localStorage.setItem(verifierStorageKey, codeVerifier);
-        console.log('[launchWebAuthFlow] Stored PKCE verifier for state:', state);
+        // Store verifier in browser.storage.session instead of localStorage
+        verifierStorageKey = `pkce_${state}`;
+        await browser.storage.session.set({ [verifierStorageKey]: codeVerifier });
+        console.log('[launchWebAuthFlow] Stored PKCE verifier in session storage for state:', state);
 
         // Define scopes needed
         const scope = 'atproto transition:generic transition:chat.bsky'; // Match client.json
@@ -106,7 +106,7 @@ function Login() {
             throw new Error('Authorization code not found in callback URL.');
         }
         if (returnedState !== state) {
-             if (verifierStorageKey) localStorage.removeItem(verifierStorageKey); 
+             if (verifierStorageKey) await browser.storage.session.remove(verifierStorageKey); 
              console.error('[launchWebAuthFlow] State mismatch! Expected:', state, 'Received:', returnedState);
              throw new Error('OAuth state mismatch. Security check failed.');
         }
@@ -140,7 +140,7 @@ function Login() {
            setError(`Login failed: ${err.message || 'Unknown error'}`);
       }
       // Clean up verifier if state was generated and error occurred
-      if (verifierStorageKey) localStorage.removeItem(verifierStorageKey);
+      if (verifierStorageKey) await browser.storage.session.remove(verifierStorageKey);
       setLoading(false);
       setInfo(null);
     }

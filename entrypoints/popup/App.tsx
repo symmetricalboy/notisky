@@ -77,9 +77,10 @@ function Login() {
       const verifier = await generateRandomString(128); // Generate PKCE verifier
       const challenge = await generateCodeChallenge(verifier); // Generate PKCE challenge
 
-      console.log('[Login] Generated State:', state.substring(0,5)+'...');
-      console.log('[Login] Generated Verifier:', verifier.substring(0,5)+'...');
-      console.log('[Login] Generated Challenge:', challenge.substring(0,5)+'...');
+      // Add detailed logging
+      console.log(`[Login] Generated State: ${state}`); 
+      console.log(`[Login] Generated Verifier: ${verifier}`); 
+      console.log(`[Login] Generated Challenge: ${challenge}`);
 
       // 1. Send verifier and state to background script for storage
       console.log('[Login] Storing PKCE state in background...');
@@ -105,7 +106,7 @@ function Login() {
       // 3. Open the auth server URL in a new tab
       console.log('[Login] Opening auth server URL in new tab...');
       setStatusMessage('Redirecting to Bluesky for authorization...');
-      await browser.tabs.create({ url: authServerUrl, active: true });
+      await browser.tabs.create({ url: authServerUrl, active: false });
 
       // 4. Wait for the background script to message us back (handled by useEffect listener)
       console.log('[Login] Waiting for completion message from background...');

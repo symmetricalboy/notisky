@@ -23,20 +23,11 @@ async function generateCodeChallenge(verifier: string): Promise<string> {
         .replace(/=/g, '');
 }
 
-// --- Constants for Auth Server Flow ---
-// const AUTH_SERVER_BASE_URL = 'https://notisky.symm.app'; 
-// const AUTH_INITIATE_ENDPOINT = `${AUTH_SERVER_BASE_URL}/api/auth/ext-auth`;
-const CLIENT_ID = 'https://notisky.symm.app/client-metadata/client.json'; // Use the actual Client ID URL
-
-// Bluesky OAuth Constants for Direct Flow
-const BLUESKY_OAUTH_URL = 'https://bsky.social/oauth/authorize';
-// const BLUESKY_REDIRECT_URI = 'https://notisky.symm.app/api/auth/extension-callback';
-
-// Function to get the extension's redirect URI for launchWebAuthFlow
-function getExtensionRedirectUri(): string {
-    // IMPORTANT: Make sure this exact URI is registered with Bluesky!
-    return browser.identity.getRedirectURL(); // Gets https://<extension-id>.chromiumapp.org/
-}
+// --- Constants ---
+// URL for the auth server endpoint that starts the flow
+const AUTH_SERVER_INITIATE_URL = 'https://notisky.symm.app/api/auth/start-extension-flow';
+// Client ID remains the same
+const CLIENT_ID = 'https://notisky.symm.app/client-metadata/client.json'; 
 
 // --- Login Component ---
 function Login() {
@@ -67,12 +58,12 @@ function Login() {
     return () => browser.runtime.onMessage.removeListener(handleMessage);
   }, []);
   
-  // Refactored direct Bluesky OAuth flow using launchWebAuthFlow
-  const handleLoginDirectOAuth = async (e: React.FormEvent) => {
+  // Reverted: Initiate OAuth flow via the Auth Server
+  const handleLoginViaAuthServer = async (e: React.FormEvent) => {
     e.preventDefault();
-    console.log('[Login Page - launchWebAuthFlow] Started');
+    console.log('[Login Page - Auth Server Flow] Started');
     setError(null);
-    setInfo('Preparing secure login with Bluesky...');
+    setInfo('Preparing secure login...');
     setLoading(true);
     let generatedState: string | null = null;
     let verifierStorageKey: string | null = null;
@@ -83,96 +74,55 @@ function Login() {
       generatedState = state;
       const codeVerifier = await generateCodeVerifier();
       const codeChallenge = await generateCodeChallenge(codeVerifier);
-      const redirectUri = getExtensionRedirectUri();
-      console.log(`[Login Page - launchWebAuthFlow] State: ${state.substring(0, 5)}...`);
-      console.log(`[Login Page - launchWebAuthFlow] Challenge: ${codeChallenge}`);
-      console.log(`[Login Page - launchWebAuthFlow] Redirect URI: ${redirectUri}`);
+      console.log(`[Login Page - Auth Server Flow] State: ${state.substring(0, 5)}...`);
+      console.log(`[Login Page - Auth Server Flow] Challenge: ${codeChallenge}`);
 
       if (!CLIENT_ID) {
-           throw new Error("Client ID is not set."); // Keep a basic check
-      }
-      if (!redirectUri) {
-        throw new Error("Could not determine extension redirect URI.");
+          throw new Error("Client ID is not set.");
       }
 
       // 2. Store verifier temporarily (background script will retrieve and remove it)
       verifierStorageKey = `pkce_${state}`;
       await browser.storage.session.set({ [verifierStorageKey]: codeVerifier });
-      console.log('[Login Page - launchWebAuthFlow] Stored PKCE verifier in session storage.');
+      console.log('[Login Page - Auth Server Flow] Stored PKCE verifier in session storage.');
 
-      // 3. Construct URL for Bluesky's OAuth endpoint
-      const blueskyOAuthParams = new URLSearchParams({
-        response_type: 'code',
-        client_id: CLIENT_ID,
-        redirect_uri: redirectUri, // Use the extension's specific redirect URI
+      // 3. Construct URL for the Auth Server's initiation endpoint
+      const authServerUrlParams = new URLSearchParams({
+        client_id: CLIENT_ID, // Pass client ID to auth server
         state: state,
         code_challenge: codeChallenge,
-        code_challenge_method: 'S256',
-        // Optional: Add scope if needed, e.g., 'read write'
-        // scope: 'read write',
+        code_challenge_method: 'S256', // Pass method too
+        // The auth server will add its own redirect_uri when calling Bluesky
       });
-      const blueskyOAuthUrl = `${BLUESKY_OAUTH_URL}?${blueskyOAuthParams.toString()}`;
-      console.log('[Login Page - launchWebAuthFlow] Constructed Bluesky OAuth URL:', blueskyOAuthUrl);
+      const authServerInitiateFullUrl = `${AUTH_SERVER_INITIATE_URL}?${authServerUrlParams.toString()}`;
+      console.log('[Login Page - Auth Server Flow] Constructed Auth Server Initiate URL:', authServerInitiateFullUrl);
 
-      // 4. Use launchWebAuthFlow to initiate the flow
-      setInfo('Redirecting to Bluesky for authorization...');
-      console.log('[Login Page - launchWebAuthFlow] Calling browser.identity.launchWebAuthFlow...');
-
-      const finalRedirectUrl = await browser.identity.launchWebAuthFlow({
-        url: blueskyOAuthUrl,
-        interactive: true // Allows user interaction (login, consent)
-      });
-
-      console.log('[Login Page - launchWebAuthFlow] Received final redirect URL:', finalRedirectUrl);
-
-      if (!finalRedirectUrl) {
-          throw new Error('Authentication flow was cancelled or failed before redirect.');
+      // 4. Open the Auth Server URL in a new tab/window
+      setInfo('Redirecting via authentication server...');
+      console.log('[Login Page - Auth Server Flow] Opening Auth Server URL...');
+      
+      // Use window.open for potentially better user experience than replacing the current tab
+      const authWindow = window.open(authServerInitiateFullUrl, '_blank', 'width=600,height=700,noopener,noreferrer');
+      if (!authWindow) {
+          // Fallback or error if window opening failed (e.g., popup blocker)
+          console.warn('[Login Page - Auth Server Flow] window.open failed, falling back to browser.tabs.create');
+          // Clear verifier if we can't even open the window
+          if (verifierStorageKey) { await browser.storage.session.remove(verifierStorageKey); }
+          throw new Error('Failed to open authentication window. Please check your popup blocker settings.');
+          // Alternative: await browser.tabs.create({ url: authServerInitiateFullUrl, active: true });
       }
 
-      // 5. Parse code and state from the final redirect URL
-      const url = new URL(finalRedirectUrl);
-      const code = url.searchParams.get('code');
-      const returnedState = url.searchParams.get('state');
-
-      if (!code) {
-        throw new Error('Authorization code not found in redirect URL.');
-      }
-      if (returnedState !== generatedState) {
-        // Attempt to clean up stored verifier if state mismatch
-        if (verifierStorageKey) {
-             try { await browser.storage.session.remove(verifierStorageKey); } catch (e) { console.warn('Error during cleanup on state mismatch:', e)}
-        }
-        throw new Error('State mismatch error. Potential CSRF attack.');
-      }
-
-      // 6. Send code and state (for verifier lookup) to background script for token exchange
-      setInfo('Authorization received. Completing sign in...');
-      console.log('[Login Page - launchWebAuthFlow] Sending code and state to background script...');
-      await browser.runtime.sendMessage({
-          type: 'EXCHANGE_CODE',
-          data: {
-              code: code,
-              state: returnedState, // Background uses this to find the verifier
-              clientId: CLIENT_ID, // Send client ID used
-              redirectUri: redirectUri // Send redirect URI used
-          }
-      });
-
-      console.log('[Login Page - launchWebAuthFlow] Message sent to background. Waiting for OAUTH_COMPLETE...');
-      // Login page now waits for the OAUTH_COMPLETE message from the background via the useEffect listener
+      console.log('[Login Page - Auth Server Flow] Auth window opened. Waiting for OAUTH_COMPLETE message from background...');
+      // Login page now waits passively for the OAUTH_COMPLETE message from the background via the useEffect listener
+      // It doesn't interact with launchWebAuthFlow or parse URLs itself anymore.
 
     } catch (err: any) {
-      console.error('[Login Page - launchWebAuthFlow] Error during login flow:', err);
+      console.error('[Login Page - Auth Server Flow] Error during login initiation:', err);
       // Attempt to clean up stored verifier on error
       if (verifierStorageKey) {
            try { await browser.storage.session.remove(verifierStorageKey); } catch (e) { console.warn('Error during cleanup on error:', e)}
       }
-      // Check if the error is from launchWebAuthFlow being cancelled
-      if (err.message?.includes('cancelled') || err.message?.includes('closed by the user')) {
-           setError('Authentication cancelled.');
-      } else {
-           setError(`Login failed: ${err.message || 'Unknown error'}`);
-      }
+      setError(`Login initiation failed: ${err.message || 'Unknown error'}`);
       setLoading(false);
       setInfo(null);
     }
@@ -187,7 +137,7 @@ function Login() {
       </div>
       
       {/* Ensure the form uses the correct handler */}
-      <form onSubmit={handleLoginDirectOAuth} className="login-form">
+      <form onSubmit={handleLoginViaAuthServer} className="login-form">
         {error && <div className="error-message">{error}</div>}
         {info && !error && <div className="info-message">{info}</div>}
                         

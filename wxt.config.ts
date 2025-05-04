@@ -20,6 +20,12 @@ export default defineConfig({
         "*://*.bsky.social/*", 
         "*://notisky.symm.app/*" // Ensure host permission is present
     ],
+    // Add externally_connectable for the auth server
+    externally_connectable: {
+      matches: [
+        "https://notisky.symm.app/*"
+      ]
+    },
     background: {
         service_worker: "entrypoints/background.ts"
     },

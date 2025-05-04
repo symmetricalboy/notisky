@@ -8,24 +8,16 @@ import {
   stopAllPolling
 } from '../src/services/notifications';
 
-// Constants for OAuth Token Exchange
+// Constants for OAuth Token Exchange (Server Flow)
 const BLUESKY_SERVICE = 'https://bsky.social'; 
 const TOKEN_ENDPOINT = `${BLUESKY_SERVICE}/oauth/token`;
-// Client ID is the hosted metadata URL (remains the same)
+// Use the metadata URL as client_id and the server callback as redirect_uri
 const CLIENT_METADATA_URL = 'https://notisky.symm.app/client-metadata/client.json'; 
+const SERVER_REDIRECT_URI = 'https://notisky.symm.app/api/auth/extension-callback'; 
 
-// Redirect URI is now specific to the extension
-// Get it dynamically at runtime
-let EXTENSION_REDIRECT_URI: string | undefined;
-try {
-  EXTENSION_REDIRECT_URI = browser.identity.getRedirectURL();
-  console.log('[Background] Determined Extension Redirect URI:', EXTENSION_REDIRECT_URI);
-  if (!EXTENSION_REDIRECT_URI) {
-    console.error('[Background] CRITICAL: Could not determine extension redirect URI on load.');
-  }
-} catch (e) {
-    console.error('[Background] CRITICAL: Error getting extension redirect URI:', e);
-}
+// Target URL for programmatic injection
+const AUTH_FINALIZE_URL_ORIGIN = 'https://notisky.symm.app';
+const AUTH_FINALIZE_URL_PATH = '/auth-finalize.html';
 
 // Store for authenticated accounts AND their agent instances
 let activeAgents: Record<string, BskyAgent> = {};
@@ -43,26 +35,31 @@ async function activateOAuthSession(account: Account): Promise<BskyAgent | null>
         return null;
     }
     try {
-        // Simply create an agent instance with the existing session data
+        // Create agent first
         const agent = new BskyAgent({ 
             service: BLUESKY_SERVICE, 
-            session: {
-                did: account.did,
-                handle: account.handle,
-                email: account.email,
-                accessJwt: account.accessJwt,
-                refreshJwt: account.refreshJwt
-            }
+            // Remove session from initial options
          });
-        // Verify session is correctly initialized (optional but good practice)
+        
+        // Then resume the session
+        await agent.resumeSession({
+            did: account.did,
+            handle: account.handle,
+            email: account.email,
+            accessJwt: account.accessJwt,
+            refreshJwt: account.refreshJwt
+        });
+
+        // Verify session resumed correctly
         if (agent.session?.did !== account.did) {
-            console.error(`Failed to initialize agent session correctly for ${account.did}`);
+            console.error(`Failed to resume agent session correctly for ${account.did}`);
+            // Optionally try to refresh token here if resume fails?
             return null;
         }
-        console.log(`Agent created for ${account.did}`);
+        console.log(`Agent session resumed for ${account.did}`);
         return agent;
     } catch (error) {
-        console.error(`Error creating agent for ${account.did}:`, error);
+        console.error(`Error creating/resuming agent for ${account.did}:`, error);
         return null;
     }
 }
@@ -73,16 +70,32 @@ function startPollingForAccount(account: Account, agent: BskyAgent): void {
       console.error(`Attempted to start polling for ${account.did} without a valid agent session.`);
       return;
   }
-  stopNotificationPolling(account.did, pollingIntervals); // Clear existing interval if any
-  startNotificationPolling(account, agent, pollingIntervals); 
+  // Stop any previous polling for this account
+  stopNotificationPolling(account.did, pollingIntervals); 
+  
+  console.log(`Starting notification polling for ${account.handle} (${account.did})`);
+  try {
+      // Call startNotificationPolling with just the account
+      const intervalId = startNotificationPolling(account);
+      // Store the returned interval ID
+      pollingIntervals[account.did] = intervalId;
+      console.log(`Polling started for ${account.did} with interval ID: ${intervalId}`);
+  } catch (error) {
+      console.error(`Failed to start polling for ${account.did}:`, error);
+  }
 }
 
 // Stop notification polling for an account
 function stopPollingForAccount(did: string): void {
   if (pollingIntervals[did]) {
+    // stopNotificationPolling expects the map as the second argument
     stopNotificationPolling(did, pollingIntervals);
-    delete pollingIntervals[did];
+    // It should handle deleting the entry from the map internally
+    // delete pollingIntervals[did]; // Remove this line
     console.log(`Stopped polling for ${did}`);
+  } else {
+      // Keep this warning
+    // console.warn(`No active polling interval found for ${did} to stop.`);
   }
 }
 
@@ -116,6 +129,78 @@ async function retrieveAndClearPkceState(state: string): Promise<string | null> 
   }
 }
 
+// Function containing the logic to be injected into the auth finalize page
+function injectedAuthFinalizeLogic() {
+  // This code runs in the context of the web page
+  console.log('[Injected Script] Running in finalize page.');
+  
+  function setStatus(message: string, isError = false) {
+    const statusEl = document.getElementById('auth-status');
+    const messageEl = document.getElementById('auth-message');
+    if (statusEl && messageEl) {
+      statusEl.textContent = message;
+      statusEl.className = isError ? 'status error' : 'status success';
+      messageEl.textContent = isError ? 'Please check the extension logs or try again.' : 'You can now close this window.';
+    } else {
+      console.warn('[Injected Script] Status elements not found');
+    }
+  }
+
+  (async () => {
+    try {
+      setStatus('Reading parameters...');
+      const params = new URLSearchParams(window.location.search);
+      const code = params.get('code');
+      const state = params.get('state');
+      const error = params.get('error');
+      const errorDescription = params.get('error_description');
+
+      if (error) {
+        console.error('[Injected Script] Error in URL:', error, errorDescription);
+        setStatus(`Error: ${error} - ${errorDescription || 'Please try again.'}`, true);
+         // Send error details back to background?
+        try {
+            const runtime = typeof browser !== 'undefined' ? browser.runtime : chrome.runtime;
+            await runtime.sendMessage({ type: 'OAUTH_CALLBACK', data: { error, error_description: errorDescription, state } });
+        } catch(e){ console.warn('[Injected Script] Failed to send error to background', e); }
+        return;
+      }
+
+      if (!code || !state) {
+        throw new Error('Missing code or state parameter in callback URL.');
+      }
+
+      setStatus('Sending details to background service...');
+      console.log('[Injected Script] Sending OAUTH_CALLBACK to background...');
+
+      const runtime = typeof browser !== 'undefined' ? browser.runtime : chrome.runtime;
+      const response = await runtime.sendMessage({
+        type: 'OAUTH_CALLBACK',
+        data: { code, state } // Send code and original state
+      });
+
+      console.log('[Injected Script] Background response:', response);
+      if (response && response.success) {
+          setStatus('Authentication details sent. Background is processing...');
+      } else {
+          setStatus(`Error during background processing: ${response?.error || 'Unknown error'}`, true);
+      }
+      
+      // Maybe don't close automatically, let background message control it?
+      // setTimeout(() => { ... }, 3000);
+
+    } catch (err: any) {
+      console.error('[Injected Script] Error:', err);
+      setStatus('Error: ' + (err.message || String(err)), true);
+      // Send error details back to background?
+      try {
+          const runtime = typeof browser !== 'undefined' ? browser.runtime : chrome.runtime;
+          await runtime.sendMessage({ type: 'OAUTH_CALLBACK', data: { error: 'script_error', error_description: err.message, state: new URLSearchParams(window.location.search).get('state') } });
+      } catch(e){ console.warn('[Injected Script] Failed to send script error to background', e); }
+    }
+  })();
+}
+
 // Initialize stored accounts on startup
 async function initializeAccounts(): Promise<void> {
   console.log('Initializing accounts...');
@@ -146,11 +231,6 @@ export default defineBackground({
   main() {
     console.log('Notisky background service started', { id: browser.runtime.id });
 
-    if (!EXTENSION_REDIRECT_URI) {
-        console.error('!!! Background service started WITHOUT a valid redirect URI. OAuth flow will fail. !!!');
-        // Potentially disable OAuth functionality or notify user?
-    }
-
     // Notification permission check (keep as is)
     browser.notifications.getPermissionLevel(level => {
       console.log('Notification permission level:', level);
@@ -158,165 +238,217 @@ export default defineBackground({
 
     // Setup message handlers
     browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
-      console.log('Background received message:', message.type, 'from', sender.tab?.id || sender.id);
+      console.log('Background received message:', message.type, 'from', sender.tab?.id || sender.url || sender.id);
 
-      // --- REINSTATE EXCHANGE_OAUTH_CODE handler ---
-      if (message.type === 'EXCHANGE_OAUTH_CODE') {
-        console.log('[Background] Received EXCHANGE_OAUTH_CODE from Login page');
-        const { code, state } = message.data || {}; // Expecting code and state
+      // --- REMOVE EXCHANGE_OAUTH_CODE handler --- 
+      // if (message.type === 'EXCHANGE_OAUTH_CODE') { ... }
+      
+      // --- REINSTATE OAUTH_CALLBACK handler ---
+      if (message.type === 'OAUTH_CALLBACK') {
+        console.log('[Background] Received OAUTH_CALLBACK from injected script');
+        const { code, state, error, error_description } = message.data || {};
 
-        if (!code || !state) {
-          console.error('[Background][EXCHANGE_OAUTH_CODE] Missing code or state in message data');
-          sendResponse({ success: false, error: 'Missing code or state' });
-          return false;
-        }
-        
-        if (!EXTENSION_REDIRECT_URI) {
-            console.error('[Background][EXCHANGE_OAUTH_CODE] Cannot process - missing extension redirect URI.');
-            sendResponse({ success: false, error: 'Background service missing redirect URI configuration.'});
+        // Handle errors passed from injected script
+        if (error) {
+            console.error(`[Background][OAUTH_CALLBACK] Error received from callback: ${error} - ${error_description}`);
+            // Send failure message to login page
+            browser.runtime.sendMessage({ type: 'OAUTH_COMPLETE', success: false, error: `OAuth Error: ${error_description || error}` }).catch(()=>{});
+            if (sendResponse) sendResponse({ success: false, error: 'OAuth error received' }); // Acknowledge receipt of error
+            // Potentially try to clean up PKCE state if state is present
+            if (state) { 
+                retrieveAndClearPkceState(state).catch(e => console.warn('Failed cleanup on error', e)); 
+            }
             return false;
         }
 
-        // Process token exchange asynchronously
+        if (!code || !state) {
+          console.error('[Background][OAUTH_CALLBACK] Missing code or state in message data.');
+          if (sendResponse) sendResponse({ success: false, error: 'Missing code or state' });
+          // Send failure message to login page
+          browser.runtime.sendMessage({ type: 'OAUTH_COMPLETE', success: false, error: 'Callback missing code or state' }).catch(()=>{});
+          return false; 
+        }
+        
+        // Acknowledge receipt before async processing (as injected script waits)
+        if (sendResponse) sendResponse({ success: true, message: 'Processing callback...'});
+
+        // Prevent duplicate processing (optional but good practice)
+        const processedFlagKey = `processed_${state}`;
         (async () => {
-          let success = false;
-          let errorMsg = 'Unknown error during token exchange.';
-          let accountData: Account | null = null;
-          let verifier: string | null = null;
-
-          try {
-            // Retrieve the verifier using the state
-            verifier = await retrieveAndClearPkceState(state);
-            if (!verifier) {
-                // State might be old/invalid, or cleanup happened prematurely
-                throw new Error(`PKCE Verifier not found or expired for state: ${state}. Please try logging in again.`);
+            const processedCheck = await browser.storage.session.get(processedFlagKey);
+            if (processedCheck[processedFlagKey]) {
+                console.warn(`[Background][OAUTH_CALLBACK] State already processed: ${state.substring(0,5)}...`);
+                // Don't send another OAUTH_COMPLETE here, already handled.
+                return; 
             }
-            console.log(`[Background][EXCHANGE_OAUTH_CODE] Retrieved PKCE verifier for state: ${state.substring(0,5)}...`);
+            await browser.storage.session.set({ [processedFlagKey]: true });
+            console.log(`[Background][OAUTH_CALLBACK] Marked state as processed: ${state.substring(0,5)}...`);
 
-            // Perform token exchange using the EXTENSION redirect URI
-            console.log('[Background][EXCHANGE_OAUTH_CODE] Performing token exchange...');
-            console.log(`[Background][EXCHANGE_OAUTH_CODE] Using redirect_uri: ${EXTENSION_REDIRECT_URI}`);
-            console.log(`[Background][EXCHANGE_OAUTH_CODE] Using client_id: ${CLIENT_METADATA_URL}`);
-            
-            const tokenRequestBody = new URLSearchParams({
-              grant_type: 'authorization_code',
-              code: code,
-              redirect_uri: EXTENSION_REDIRECT_URI, // Use extension URI
-              client_id: CLIENT_METADATA_URL,
-              code_verifier: verifier // Retrieved using state
-            });
+            // --- Process Token Exchange --- 
+            let success = false;
+            let errorMsg = 'Unknown error during token exchange.';
+            let accountData: Account | null = null;
+            let verifier: string | null = null;
 
-            const tokenResponse = await fetch(TOKEN_ENDPOINT, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/x-www-form-urlencoded'
-              },
-              body: tokenRequestBody.toString()
-            });
-
-            const responseBodyText = await tokenResponse.text();
-            let tokenData: any = {}; // Use 'any' temporarily for parsing
-
-            if (!tokenResponse.ok) {
-              let errorJson: any = { error: 'unknown_exchange_error', error_description: 'Failed to exchange token.' };
-              try {
-                errorJson = JSON.parse(responseBodyText);
-              } catch (parseError) {
-                console.warn("[Background][EXCHANGE_OAUTH_CODE] Token error response was not valid JSON:", responseBodyText);
-                errorJson.error_description = responseBodyText; // Use raw text if not JSON
-              }
-              console.error(`[Background][EXCHANGE_OAUTH_CODE] Token exchange failed. Status: ${tokenResponse.status}, Response:`, errorJson);
-              throw new Error(`Token exchange failed (${tokenResponse.status}): ${errorJson.error_description || errorJson.error || 'Unknown error'}`);
-            }
-
-            // Handle success: Parse the text body as JSON
             try {
-              tokenData = JSON.parse(responseBodyText);
-            } catch (parseError) {
-              console.error("[Background][EXCHANGE_OAUTH_CODE] Failed to parse successful token response JSON:", responseBodyText, parseError);
-              throw new Error('Failed to parse successful token response.');
-            }
+                console.log(`[Background][OAUTH_CALLBACK] Processing code for state: ${state.substring(0,5)}...`);
+                verifier = await retrieveAndClearPkceState(state);
+                if (!verifier) {
+                    throw new Error(`PKCE Verifier not found or expired for state: ${state}. Please try logging in again.`);
+                }
+                console.log('[Background][OAUTH_CALLBACK] Retrieved PKCE verifier.');
 
-            // Validate the parsed tokenData object
-            if (!tokenData.access_token || !tokenData.refresh_token || !tokenData.did) {
-              console.error("[Background][EXCHANGE_OAUTH_CODE] Token response missing required fields:", tokenData);
-              throw new Error('Token response missing required fields (access_token, refresh_token, did).');
-            }
-
-            console.log(`[Background][EXCHANGE_OAUTH_CODE] Token exchange successful for DID: ${tokenData.did}`);
-
-            // Convert token data to Account structure
-            const newAccount = await tokenResponseToAccount(tokenData);
-            if (!newAccount) {
-              throw new Error('Failed to create account object from token response.');
-            }
-            accountData = newAccount; // Store for final message
-
-            // Save account and activate session/polling
-            await saveAccount(newAccount);
-            const agent = await activateOAuthSession(newAccount);
-            if (agent) {
-              activeAgents[newAccount.did] = agent;
-              startPollingForAccount(newAccount, agent);
-              success = true;
-              console.log(`[Background][EXCHANGE_OAUTH_CODE] Account ${newAccount.handle} activated and polling started.`);
-            } else {
-              // Account saved, but activation failed. Remove?
-              await removeAccount(newAccount.did); 
-              throw new Error('Failed to activate agent session after token exchange. Account removed.');
-            }
-          } catch (err: any) {
-            console.error('[Background][EXCHANGE_OAUTH_CODE] Error during exchange or account setup:', err);
-            errorMsg = err.message || 'An unknown error occurred.';
-            // Attempt to clean up PKCE state if verifier was retrieved but exchange failed
-            // Note: retrieveAndClearPkceState already clears it on successful retrieval.
-          }
-
-          // Send final completion message back to the Login page
-          console.log(`[Background][EXCHANGE_OAUTH_CODE] Sending OAUTH_COMPLETE to UI. Success: ${success}`);
-          try {
-            // Find the login tab (sender might be closed)
-            const loginTabs = await browser.tabs.query({ url: browser.runtime.getURL("/login.html") });
-            if (loginTabs.length > 0 && loginTabs[0].id) {
-                await browser.tabs.sendMessage(loginTabs[0].id, {
-                    type: 'OAUTH_COMPLETE',
-                    success: success,
-                    error: success ? undefined : errorMsg,
-                    account: success ? accountData : undefined
+                console.log('[Background][OAUTH_CALLBACK] Performing token exchange...');
+                console.log(`[Background][OAUTH_CALLBACK] Using redirect_uri: ${SERVER_REDIRECT_URI}`);
+                console.log(`[Background][OAUTH_CALLBACK] Using client_id: ${CLIENT_METADATA_URL}`);
+                
+                const tokenRequestBody = new URLSearchParams({
+                  grant_type: 'authorization_code',
+                  code: code,
+                  redirect_uri: SERVER_REDIRECT_URI, // Use SERVER URI
+                  client_id: CLIENT_METADATA_URL, // Use METADATA URL
+                  code_verifier: verifier
                 });
-            } else {
-                 console.warn('[Background][EXCHANGE_OAUTH_CODE] Could not find Login tab to send OAUTH_COMPLETE message.');
-                 // Maybe update badge or show notification as fallback?
-                 if (success) updateNotificationBadge(); 
-            }
-          } catch (sendMessageError: any) {
-             console.error('[Background][EXCHANGE_OAUTH_CODE] Failed to send OAUTH_COMPLETE message to Login UI:', sendMessageError);
-          }
-        })().catch(err => {
-          // Should not happen if try/catch inside async is robust
-          console.error('[Background][EXCHANGE_OAUTH_CODE] Unexpected top-level error:', err);
-          // Attempt to send failure message if possible
-          browser.runtime.sendMessage({ type: 'OAUTH_COMPLETE', success: false, error: 'Unexpected background error.' }).catch(()=>{});
-        });
 
-        return true; // Indicate async response
+                const tokenResponse = await fetch(TOKEN_ENDPOINT, {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                  },
+                  body: tokenRequestBody.toString()
+                });
+
+                const responseBodyText = await tokenResponse.text();
+                let tokenData: any = {};
+
+                if (!tokenResponse.ok) {
+                  let errorJson: any = { error: 'token_exchange_failed', error_description: 'Failed to exchange code for token.' };
+                  try {
+                    errorJson = JSON.parse(responseBodyText);
+                  } catch (parseError) { 
+                    console.warn("[Background][OAUTH_CALLBACK] Token error response was not valid JSON:", responseBodyText);
+                    errorJson.error_description = responseBodyText;
+                  }
+                  console.error(`[Background][OAUTH_CALLBACK] Token exchange failed. Status: ${tokenResponse.status}, Response:`, errorJson);
+                  throw new Error(`Token exchange failed (${tokenResponse.status}): ${errorJson.error_description || errorJson.error || 'Unknown error'}`);
+                }
+
+                try {
+                  tokenData = JSON.parse(responseBodyText);
+                } catch (parseError) {
+                  console.error("[Background][OAUTH_CALLBACK] Failed to parse successful token response JSON:", responseBodyText, parseError);
+                  throw new Error('Failed to parse successful token response.');
+                }
+
+                if (!tokenData.access_token || !tokenData.refresh_token || !tokenData.did) {
+                  console.error("[Background][OAUTH_CALLBACK] Token response missing required fields:", tokenData);
+                  throw new Error('Token response missing required fields (access_token, refresh_token, did).');
+                }
+
+                console.log(`[Background][OAUTH_CALLBACK] Token exchange successful for DID: ${tokenData.did}`);
+                const newAccount = await tokenResponseToAccount(tokenData);
+                if (!newAccount) {
+                  throw new Error('Failed to create account object from token response.');
+                }
+                accountData = newAccount;
+
+                await saveAccount(newAccount);
+                const agent = await activateOAuthSession(newAccount);
+                if (agent) {
+                  activeAgents[newAccount.did] = agent;
+                  startPollingForAccount(newAccount, agent); // Uses fixed version
+                  success = true;
+                  console.log(`[Background][OAUTH_CALLBACK] Account ${newAccount.handle} activated.`);
+                } else {
+                  await removeAccount(newAccount.did);
+                  throw new Error('Failed to activate agent session after token exchange. Account removed.');
+                }
+
+            } catch (err: any) {
+                console.error('[Background][OAUTH_CALLBACK] Error during token exchange or account setup:', err);
+                errorMsg = err.message || 'An unknown error occurred.';
+                // PKCE state already cleared if verifier was retrieved
+            }
+
+            // --- Send final status message to Login Page --- 
+            console.log(`[Background][OAUTH_CALLBACK] Sending OAUTH_COMPLETE to UI. Success: ${success}`);
+            try {
+                // Find the login tab 
+                const loginTabs = await browser.tabs.query({ url: browser.runtime.getURL("/login.html") });
+                if (loginTabs.length > 0 && loginTabs[0].id) {
+                    await browser.tabs.sendMessage(loginTabs[0].id, { 
+                        type: 'OAUTH_COMPLETE', 
+                        success: success, 
+                        error: success ? undefined : errorMsg, 
+                        account: success ? accountData : undefined
+                    });
+                } else {
+                    console.warn('[Background][OAUTH_CALLBACK] Could not find Login tab to send OAUTH_COMPLETE message.');
+                    if (success) updateNotificationBadge(); // Update badge as fallback on success
+                }
+            } catch (sendMessageError: any) {
+                console.error('[Background][OAUTH_CALLBACK] Failed to send OAUTH_COMPLETE message to Login UI:', sendMessageError);
+            }
+        })(); // End async IIFE for processing
+
+        return true; // Indicate async handling initiated
       }
       
-      // --- REMOVE OAUTH_CALLBACK handler ---
-      // if (message.type === 'OAUTH_CALLBACK') { ... }
-
       // Other message handlers (GET_ACCOUNTS, REMOVE_ACCOUNT, etc. - keep as is)
-      // ... existing code ...
+      if (message.type === 'GET_ACCOUNTS') {
+          // ... existing logic ...
+          return false;
+      }
+      
+      if (message.type === 'NOTIFICATION_VIEW') {
+          // ... existing logic ...
+          return false;
+      }
+      
+      if (message.type === 'REMOVE_ACCOUNT') {
+          // ... existing logic ...
+          return true; // Indicate async response
+      }
+      
+      if (message.type === 'GET_AUTH_STATUS') {
+          // ... existing logic ...
+          return false;
+      }
       
       console.warn('Unhandled message type in background:', message.type);
       return false; 
     });
 
-    // Notification click handler (keep as is)
-    browser.notifications.onClicked.addListener((notificationId) => {
-      console.log(`Notification clicked: ${notificationId}`);
-      browser.tabs.create({ url: 'https://bsky.app/notifications' });
-      browser.notifications.clear(notificationId);
+    // --- REINSTATE tabs.onUpdated listener for injection ---
+    browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+        if (changeInfo.status === 'complete' && tab.url) {
+            try {
+                const url = new URL(tab.url);
+                // Check if it's the finalize URL hosted by the auth server
+                if (url.origin === AUTH_FINALIZE_URL_ORIGIN && url.pathname === AUTH_FINALIZE_URL_PATH) {
+                    console.log(`[Background] Detected auth finalize page loaded: ${tab.url}`);
+                    
+                    // Check scripting permission for the *server's* origin
+                    const hasPermission = await browser.permissions.contains({ origins: [url.origin + '/*'] });
+                    if (!hasPermission) {
+                       console.error(`[Background] Missing host permission for ${url.origin} needed for script injection.`);
+                       // TODO: Maybe notify user or request permission?
+                       return; 
+                    }
+
+                    console.log(`[Background] Injecting script into ${tab.url}`);
+                    await browser.scripting.executeScript({
+                        target: { tabId: tabId },
+                        func: injectedAuthFinalizeLogic, 
+                    });
+                    console.log('[Background] Injected auth finalize script.');
+                }
+            } catch (error: any) {
+                if (!(error instanceof TypeError && error.message.includes('Invalid URL'))) {
+                   console.error('[Background] Error in tabs.onUpdated listener:', error);
+                }
+            }
+        }
     });
 
     // Initial load of accounts (keep as is)

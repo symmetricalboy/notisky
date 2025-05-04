@@ -11,13 +11,14 @@ import {
 // Constants for OAuth Token Exchange (Server Flow)
 const BLUESKY_SERVICE = 'https://bsky.social'; 
 const TOKEN_ENDPOINT = `${BLUESKY_SERVICE}/oauth/token`;
-// Use the metadata URL as client_id and the server callback as redirect_uri
-const CLIENT_METADATA_URL = 'https://notisky.symm.app/client-metadata/client.json'; 
-const SERVER_REDIRECT_URI = 'https://notisky.symm.app/api/auth/extension-callback'; 
+// Use the correct metadata URL as client_id
+const CLIENT_ID = 'https://notisky.symm.app/client-metadata/client.json';
+// Use the redirect URI that's registered in the client metadata
+const SERVER_REDIRECT_URI = 'https://notisky.symm.app/api/auth/extension-callback';
 
 // Target URL for programmatic injection
 const AUTH_FINALIZE_URL_ORIGIN = 'https://notisky.symm.app';
-const AUTH_FINALIZE_URL_PATH = '/auth-finalize.html';
+const AUTH_FINALIZE_URL_PATH = '/api/auth/extension-callback';
 
 // Store for authenticated accounts AND their agent instances
 let activeAgents: Record<string, BskyAgent> = {};
@@ -125,54 +126,46 @@ function base64UrlEncode(str: string): string {
     .replace(/=+$/, '');
 }
 
-// Update token exchange to include DPoP
-async function exchangeCodeForToken(code: string, verifier: string, state: string): Promise<any> {
-  console.log('[Background][OAUTH_CALLBACK] Performing token exchange...');
-  console.log(`[Background][OAUTH_CALLBACK] Using redirect_uri: ${SERVER_REDIRECT_URI}`);
-  console.log(`[Background][OAUTH_CALLBACK] Using client_id: ${CLIENT_METADATA_URL}`);
+// Function to perform OAuth Token Exchange (PKCE only, no DPoP for now)
+async function exchangeCodeForTokenPkce(
+  code: string, 
+  verifier: string, 
+  clientId: string, // Passed from login flow
+  redirectUri: string // Passed from login flow
+): Promise<any> { // Returns the raw fetch Response
+  console.log('[Background][Exchange] Performing PKCE token exchange...');
+  console.log(`[Background][Exchange] Using redirect_uri: ${redirectUri}`);
+  console.log(`[Background][Exchange] Using client_id: ${clientId}`);
   
-  // Make sure these parameters match exactly what was used in the authorization request
   const tokenRequestBody = new URLSearchParams({
     grant_type: 'authorization_code',
     code: code,
-    redirect_uri: SERVER_REDIRECT_URI,
-    client_id: CLIENT_METADATA_URL,
+    redirect_uri: redirectUri, // Use the correct extension redirect URI
+    client_id: clientId,       // Use the client ID from the login flow
     code_verifier: verifier
   });
 
+  console.log('[Background][Exchange] Token request payload:', tokenRequestBody.toString());
+
   try {
-    // For simplicity, we'll use the auth server to handle the token exchange
-    // This avoids WebCrypto API issues in service workers
-    const tokenExchangeUrl = `${AUTH_FINALIZE_URL_ORIGIN}/api/auth/token-exchange`;
-    
-    // Send the token request through our server which will add DPoP headers
-    const response = await fetch(tokenExchangeUrl, {
+    // Use Bluesky's standard token endpoint
+    const response = await fetch(TOKEN_ENDPOINT, { // TOKEN_ENDPOINT should be https://bsky.social/oauth/token
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Accept': 'application/json' // Expect JSON response
       },
-      body: JSON.stringify({
-        code: code,
-        redirect_uri: SERVER_REDIRECT_URI,
-        client_id: CLIENT_METADATA_URL,
-        code_verifier: verifier,
-        state: state
-      })
+      body: tokenRequestBody
     });
 
-    if (response.status === 401) {
-      const nonce = response.headers.get('DPoP-Nonce');
-      if (nonce) {
-        console.log(`[Background][OAUTH_CALLBACK] Received DPoP nonce: ${nonce}, but server-side DPoP is required.`);
-        dpopServerNonce = nonce;
-        throw new Error('DPoP nonce required but server-side handling is not implemented.');
-      }
-    }
-    
-    return response;
+    console.log('[Background][Exchange] Token response status:', response.status);
+    // Optionally log headers if needed for debugging
+    // console.log('[Background][Exchange] Token response headers:', Object.fromEntries(response.headers.entries()));
+
+    return response; // Return the raw response for processing
   } catch (error) {
-    console.error('[Background][OAUTH_CALLBACK] Token exchange error:', error);
-    throw error;
+    console.error('[Background][Exchange] Token exchange fetch error:', error);
+    throw error; // Re-throw to be caught by the caller
   }
 }
 
@@ -280,72 +273,6 @@ async function retrieveAndClearPkceState(state: string): Promise<string | null> 
   }
 }
 
-// Function containing the logic to be injected into the auth finalize page
-function injectedAuthFinalizeLogic() {
-  // This code runs in the context of the web page
-  console.log('[Injected Script] Running in finalize page.');
-  
-  function setStatus(message: string, isError = false) {
-    const statusEl = document.getElementById('auth-status');
-    const messageEl = document.getElementById('auth-message');
-    if (statusEl && messageEl) {
-      statusEl.textContent = message;
-      statusEl.className = isError ? 'status error' : 'status success';
-      messageEl.textContent = isError ? 'Please check the extension logs or try again.' : 'You can now close this window.';
-    } else {
-      console.warn('[Injected Script] Status elements not found');
-    }
-  }
-
-  (async () => {
-    try {
-      setStatus('Reading parameters...');
-      const params = new URLSearchParams(window.location.search);
-      const code = params.get('code');
-      const state = params.get('state');
-      const error = params.get('error');
-      const errorDescription = params.get('error_description');
-
-      if (error) {
-        console.error('[Injected Script] Error in URL:', error, errorDescription);
-        setStatus(`Error: ${error} - ${errorDescription || 'Please try again.'}`, true);
-        try {
-            const runtime = typeof browser !== 'undefined' ? browser.runtime : chrome.runtime;
-            await runtime.sendMessage({ type: 'OAUTH_CALLBACK', data: { error, error_description: errorDescription, state } });
-        } catch(e){ console.warn('[Injected Script] Failed to send error to background', e); }
-        return;
-      }
-
-      if (!code || !state) {
-        throw new Error('Missing code or state parameter in callback URL.');
-      }
-
-      setStatus('Sending details to background service...');
-      console.log('[Injected Script] Sending OAUTH_CALLBACK to background...');
-
-      const runtime = typeof browser !== 'undefined' ? browser.runtime : chrome.runtime;
-      const response = await runtime.sendMessage({
-        type: 'OAUTH_CALLBACK',
-        data: { code, state } 
-      });
-
-      console.log('[Injected Script] Background response:', response);
-      if (response && response.success) {
-          setStatus('Authentication details sent. Background is processing...');
-      } else {
-          setStatus(`Error during background processing: ${response?.error || 'Unknown error'}`, true);
-      }
-    } catch (err: any) {
-      console.error('[Injected Script] Error:', err);
-      setStatus('Error: ' + (err.message || String(err)), true);
-      try {
-          const runtime = typeof browser !== 'undefined' ? browser.runtime : chrome.runtime;
-          await runtime.sendMessage({ type: 'OAUTH_CALLBACK', data: { error: 'script_error', error_description: err.message, state: new URLSearchParams(window.location.search).get('state') } });
-      } catch(e){ console.warn('[Injected Script] Failed to send script error to background', e); }
-    }
-  })();
-}
-
 // Initialize stored accounts on startup
 async function initializeAccounts(): Promise<void> {
   console.log('Initializing accounts...');
@@ -372,6 +299,9 @@ async function initializeAccounts(): Promise<void> {
   console.log(`Initialization complete. Active agents: ${Object.keys(activeAgents).length}`);
 }
 
+// Define a placeholder or actual uninstall URL if needed
+const UNINSTALL_URL = 'https://example.com/uninstalled'; // Replace if needed
+
 export default defineBackground({
   main() {
     console.log('Notisky background service started', { id: browser.runtime.id });
@@ -385,17 +315,125 @@ export default defineBackground({
     browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
       console.log('Background received message:', message.type, 'from', sender.tab?.id || sender.url || sender.id);
 
-      // --- REMOVE EXCHANGE_OAUTH_CODE handler --- 
-      // if (message.type === 'EXCHANGE_OAUTH_CODE') { ... }
+      // --- NEW: Handler for EXCHANGE_CODE from Login.tsx ---
+      if (message.type === 'EXCHANGE_CODE') {
+        const { code, state, clientId, redirectUri } = message.data || {};
+        console.log(`[Background][EXCHANGE_CODE] Received code for state: ${state?.substring(0,5)}...`);
+
+        if (!code || !state || !clientId || !redirectUri) {
+          console.error('[Background][EXCHANGE_CODE] Missing required data in message.', message.data);
+          // Send failure back to login page (and popup potentially)
+          browser.runtime.sendMessage({ 
+              type: 'OAUTH_COMPLETE', 
+              success: false, 
+              error: 'Internal Error: Missing data for token exchange.' 
+          }).catch(()=>{});
+          if (sendResponse) sendResponse({ success: false, error: 'Missing data'});
+          return false; // Indicate synchronous response sending is not needed / handled
+        }
+        
+        // Acknowledge receipt before async operations
+        if (sendResponse) sendResponse({ success: true, message: 'Processing code exchange...' });
+
+        // Use IIFE to handle async logic cleanly
+        (async () => {
+            let success = false;
+            let errorMsg = 'Unknown error during token exchange process.';
+            let accountData: Account | null = null;
+
+            try {
+                const verifier = await retrieveAndClearPkceState(state);
+                if (!verifier) {
+                    throw new Error(`PKCE Verifier not found or expired for state: ${state}. Please try logging in again.`);
+                }
+                console.log('[Background][EXCHANGE_CODE] Retrieved PKCE verifier.');
+
+                // Perform the token exchange using the new function
+                const tokenResponse = await exchangeCodeForTokenPkce(code, verifier, clientId, redirectUri);
+
+                if (!tokenResponse.ok) {
+                    // Handle error response from Bluesky
+                    const errorText = await tokenResponse.text();
+                    let errorData = { error: 'token_exchange_failed', error_description: errorText };
+                    try { errorData = JSON.parse(errorText); } catch (e) { /* ignore if not JSON */ }
+                    console.error(`[Background][EXCHANGE_CODE] Token exchange failed. Status: ${tokenResponse.status}, Response:`, errorData);
+                    throw new Error(`Token exchange failed (${tokenResponse.status}): ${errorData.error_description || errorData.error || 'Unknown error'}`);
+                }
+
+                // Process successful token response
+                const tokenData = await tokenResponse.json();
+                console.log('[Background][EXCHANGE_CODE] Received token data.'); // Avoid logging tokens themselves
+
+                // Create/Update Account object (assuming tokenResponseToAccount handles the structure)
+                // We might need the user's DID/Handle - requires another API call typically
+                // For now, let's assume tokenData contains enough info or tokenResponseToAccount can derive it
+                const tempAgent = new BskyAgent({ service: BLUESKY_SERVICE });
+                await tempAgent.resumeSession({
+                    accessJwt: tokenData.access_token, 
+                    refreshJwt: tokenData.refresh_token, 
+                    did: tokenData.did, // Assuming Bluesky returns did
+                    handle: tokenData.handle // Assuming Bluesky returns handle (it might not!)
+                 });
+                 
+                 if (!tempAgent.session?.did || !tempAgent.session?.handle) {
+                     // Need to fetch profile if not included in token response
+                     console.log('[Background][EXCHANGE_CODE] Fetching profile details using new token...');
+                     const profileRes = await tempAgent.api.app.bsky.actor.getProfile({ actor: tokenData.did || 'me' }); 
+                     if (!profileRes.data.did || !profileRes.data.handle) {
+                        throw new Error('Failed to retrieve profile information (DID/Handle) after token exchange.');
+                     }
+                     tokenData.did = profileRes.data.did;
+                     tokenData.handle = profileRes.data.handle;
+                 }
+                 
+                accountData = await tokenResponseToAccount(tokenData); 
+                if (!accountData) {
+                    throw new Error('Failed to process token data into account structure.');
+                }
+
+                console.log(`[Background][EXCHANGE_CODE] Saving account: ${accountData.handle} (${accountData.did})`);
+                await saveAccount(accountData);
+
+                // Activate the new session
+                const agent = await activateOAuthSession(accountData);
+                if (!agent) {
+                    throw new Error('Failed to activate agent session after successful token exchange.');
+                }
+                activeAgents[accountData.did] = agent;
+                startPollingForAccount(accountData, agent);
+
+                success = true;
+                console.log(`[Background][EXCHANGE_CODE] Account ${accountData.handle} added and polling started.`);
+
+            } catch (err: any) {
+                console.error('[Background][EXCHANGE_CODE] Error during processing:', err);
+                errorMsg = err.message || 'An unknown error occurred.';
+                // Ensure accountData is null on error if it was partially populated
+                accountData = null; 
+            }
+
+            // Send final result message
+            console.log(`[Background][EXCHANGE_CODE] Sending OAUTH_COMPLETE. Success: ${success}`);
+            browser.runtime.sendMessage({
+                type: 'OAUTH_COMPLETE',
+                success: success,
+                account: success && accountData ? { did: accountData.did, handle: accountData.handle } : undefined,
+                error: !success ? errorMsg : undefined
+            }).catch((e) => console.warn('[Background][EXCHANGE_CODE] Failed to send OAUTH_COMPLETE message', e));
+
+        })(); // End async IIFE
+
+        return true; // Indicate async response pending
+      }
       
-      // --- REINSTATE OAUTH_CALLBACK handler ---
+      // --- OLD: OAUTH_CALLBACK handler (keep for now, maybe remove later) ---
       if (message.type === 'OAUTH_CALLBACK') {
-        console.log('[Background] Received OAUTH_CALLBACK from injected script');
+        console.warn('[Background] OAUTH_CALLBACK handler invoked - this might be legacy.');
         const { code, state, error, error_description } = message.data || {};
 
         // Handle errors passed from injected script
         if (error) {
-            console.error(`[Background][OAUTH_CALLBACK] Error received from callback: ${error} - ${error_description}`);
+            console.error('[Injected Script] Error in URL:', error, error_description);
             // Send failure message to login page
             browser.runtime.sendMessage({ type: 'OAUTH_COMPLETE', success: false, error: `OAuth Error: ${error_description || error}` }).catch(()=>{});
             if (sendResponse) sendResponse({ success: false, error: 'OAuth error received' }); // Acknowledge receipt of error
@@ -443,45 +481,51 @@ export default defineBackground({
                 }
                 console.log('[Background][OAUTH_CALLBACK] Retrieved PKCE verifier.');
 
-                console.log('[Background][OAUTH_CALLBACK] Performing token exchange...');
-                console.log(`[Background][OAUTH_CALLBACK] Using redirect_uri: ${SERVER_REDIRECT_URI}`);
-                console.log(`[Background][OAUTH_CALLBACK] Using client_id: ${CLIENT_METADATA_URL}`);
-                
-                // Make sure these parameters match exactly what was used in the authorization request
-                const tokenRequestBody = new URLSearchParams({
-                  grant_type: 'authorization_code',
-                  code: code,
-                  redirect_uri: SERVER_REDIRECT_URI,
-                  client_id: CLIENT_METADATA_URL,
-                  code_verifier: verifier
-                });
+                console.log('[Background][OAUTH_CALLBACK] Performing token exchange... [LEGACY PATH]');
+                // Use the new function, but with the old constants defined in this file
+                // This whole block is likely unused now, but we fix the call site
+                const tokenResponse = await exchangeCodeForTokenPkce(code, verifier, CLIENT_ID, SERVER_REDIRECT_URI);
 
-                const tokenResponse = await exchangeCodeForToken(code, verifier, state);
-
-                const responseBodyText = await tokenResponse.text();
-                let tokenData: any = {};
-
+                // Process the token response
                 if (!tokenResponse.ok) {
-                  let errorJson: any = { error: 'token_exchange_failed', error_description: 'Failed to exchange code for token.' };
+                  // Handle error response
+                  const errorText = await tokenResponse.text();
+                  console.log('[Background][OAUTH_CALLBACK] Error response body:', errorText);
+                  
+                  let errorData: { error: string, error_description?: string } = { error: 'token_exchange_failed' };
+                  
                   try {
-                    errorJson = JSON.parse(responseBodyText);
-                  } catch (parseError) { 
-                    console.warn("[Background][OAUTH_CALLBACK] Token error response was not valid JSON:", responseBodyText);
-                    errorJson.error_description = responseBodyText;
+                    errorData = JSON.parse(errorText);
+                    console.log('[Background][OAUTH_CALLBACK] Parsed error data:', errorData);
+                  } catch (e) {
+                    // If not JSON, use text as error description
+                    console.log('[Background][OAUTH_CALLBACK] Error response is not JSON, using as error description');
+                    errorData.error_description = errorText;
                   }
-                  console.error(`[Background][OAUTH_CALLBACK] Token exchange failed. Status: ${tokenResponse.status}, Response:`, errorJson);
-                  throw new Error(`Token exchange failed (${tokenResponse.status}): ${errorJson.error_description || errorJson.error || 'Unknown error'}`);
+                  
+                  console.error(`[Background][OAUTH_CALLBACK] Token exchange failed. Status: ${tokenResponse.status}, Response:`, errorData);
+                  throw new Error(`Token exchange failed (${tokenResponse.status}): ${errorData.error_description || errorData.error || 'Unknown error'}`);
                 }
-
-                try {
-                  tokenData = JSON.parse(responseBodyText);
-                } catch (parseError) {
-                  console.error("[Background][OAUTH_CALLBACK] Failed to parse successful token response JSON:", responseBodyText, parseError);
-                  throw new Error('Failed to parse successful token response.');
-                }
-
+                
+                // Parse successful response
+                const tokenData = await tokenResponse.json();
+                console.log('[Background][OAUTH_CALLBACK] Received token data:', 
+                  JSON.stringify({
+                    ...tokenData,
+                    access_token: tokenData.access_token ? '[REDACTED]' : undefined,
+                    refresh_token: tokenData.refresh_token ? '[REDACTED]' : undefined
+                  })
+                );
+                
                 if (!tokenData.access_token || !tokenData.refresh_token || !tokenData.did) {
-                  console.error("[Background][OAUTH_CALLBACK] Token response missing required fields:", tokenData);
+                  console.error("[Background][OAUTH_CALLBACK] Token response missing required fields:", 
+                    JSON.stringify({
+                      has_access_token: !!tokenData.access_token,
+                      has_refresh_token: !!tokenData.refresh_token,
+                      has_did: !!tokenData.did,
+                      keys: Object.keys(tokenData)
+                    })
+                  );
                   throw new Error('Token response missing required fields (access_token, refresh_token, did).');
                 }
 
@@ -566,44 +610,6 @@ export default defineBackground({
       browser.notifications.clear(notificationId);
     });
 
-    // --- REINSTATE tabs.onUpdated listener for injection --- 
-    browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
-        // Add log to see if listener fires at all
-        // console.log(`[onUpdated] tabId: ${tabId}, status: ${changeInfo.status}, url: ${tab.url}`);
-        
-        if (changeInfo.status === 'complete' && tab.url) {
-             // Add log to see if status is complete and URL is present
-            // console.log(`[onUpdated] Status complete for ${tab.url}`);
-            try {
-                const url = new URL(tab.url);
-                if (url.origin === AUTH_FINALIZE_URL_ORIGIN && url.pathname === AUTH_FINALIZE_URL_PATH) {
-                    console.log(`[Background][onUpdated] Detected auth finalize page loaded: ${tab.url}`);
-                    
-                    const hasPermission = await browser.permissions.contains({ origins: [url.origin + '/*'] });
-                    if (!hasPermission) {
-                       console.error(`[Background][onUpdated] Missing host permission for ${url.origin} needed for script injection.`);
-                       return; 
-                    }
-
-                    console.log(`[Background][onUpdated] Attempting script injection into tab ${tabId}...`);
-                    await browser.scripting.executeScript({
-                        target: { tabId: tabId },
-                        func: injectedAuthFinalizeLogic, // Ensure this function is defined above
-                    });
-                    console.log('[Background][onUpdated] Injected auth finalize script successfully.');
-                } else {
-                    // console.log(`[onUpdated] URL did not match: ${tab.url}`);
-                }
-            } catch (error: any) {
-                if (error instanceof TypeError && error.message.includes('Invalid URL')) {
-                    // Ignore errors for special URLs like about:blank
-                } else {
-                   console.error('[Background][onUpdated] Error processing tab update:', error);
-                }
-            }
-        }
-    });
-
     // Initial load of accounts (keep as is)
     initializeAccounts().catch(error => {
         console.error('Failed to initialize accounts on startup:', error);
@@ -618,5 +624,10 @@ export default defineBackground({
         });
       }
     });
-  }
+
+    // Cleanup on extension uninstall (use defined constant)
+    browser.runtime.setUninstallURL(UNINSTALL_URL);
+  },
+
+  // --- Programmatic injection removed ---
 });

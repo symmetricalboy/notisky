@@ -4,6 +4,9 @@ const { BskyAgent } = AtprotoAPI;
 const { AtpSessionEvent, AppBskyNotificationListNotifications } = AtprotoAPI;
 
 import { Account } from './auth';
+// Import the DPoP fetch function and Account type from background
+// Adjust path as necessary based on file structure
+import { agentFetchWithDpop } from '../../entrypoints/background';
 
 // Store for notification counts per account
 const notificationCounts: Record<string, number> = {};
@@ -65,31 +68,46 @@ export function stopAllPolling(pollingIntervals: Record<string, number>): void {
  * Fetch notifications for an account and process new ones
  */
 async function fetchNotifications(
-  account: Account,       // Keep account for context
-  agent: BskyAgent        // Accept agent again
+  account: Account,       // Need account for tokens/keys/PDS
+  agent: BskyAgent        // Keep agent for potential fallback or future use? (optional now)
 ): Promise<void> {
   
   try {
     const lastSeenAt = lastNotificationTimestamps[account.did] || undefined;
     
-    // Construct parameters for the API call
-    const params: AtprotoAPI.AppBskyNotificationListNotifications.QueryParams = {
-        limit: 50
-    };
+    // Construct parameters and URL for manual fetch
+    const params = new URLSearchParams({
+        limit: '50' // URLSearchParams needs string values
+    });
     if (lastSeenAt) {
-        params.seenAt = lastSeenAt;
+        params.set('seenAt', lastSeenAt);
     }
 
     console.log(`[Notifications] Fetching for ${account.handle} via agent:`, params);
     
-    // Make the request using the agent's method
-    const response = await agent.api.app.bsky.notification.listNotifications(params);
+    // Construct the full URL for the XRPC endpoint
+    const listNotificationsUrl = `${account.pdsUrl}/xrpc/app.bsky.notification.listNotifications?${params.toString()}`;
+    console.log(`[Notifications] Manually fetching URL: ${listNotificationsUrl}`);
 
-    // Agent methods throw on error, so no need to check response.ok
-    // if (!response.ok) { ... }
+    // Bind the DPoP fetch function to the account's context
+    const boundFetch = agentFetchWithDpop.bind(account);
 
-    // Assuming agent method returns data directly in expected structure
-    const responseData = response.data; // Access data property
+    // Make the request using the imported DPoP fetch function
+    const response = await boundFetch(listNotificationsUrl, { 
+        method: 'GET', 
+        headers: { 
+            // agentFetchWithDpop handles Authorization and DPoP headers 
+            'Accept': 'application/json'
+        }
+    });
+
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Fetch failed: ${response.status} ${response.statusText} - ${errorText}`);
+    }
+
+    // Parse the JSON response body
+    const responseData: AtprotoAPI.AppBskyNotificationListNotifications.OutputSchema = await response.json(); 
     
     // Get only unread notifications
     const unreadNotifications = responseData.notifications.filter(

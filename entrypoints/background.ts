@@ -250,39 +250,40 @@ async function initializeAccounts(): Promise<void> {
       }
 
       console.log(`Initializing agent for ${account.handle} (${account.did}) using stored OAuth tokens and DPoP fetch`);
-      let agent: BskyAgent | null = null;
-
       try {
-        // Bind the DPoP fetch function to this specific account's context
-        const boundFetch = agentFetchWithDpop.bind(account);
-
-        // Create the agent, providing the service URL and the custom fetch implementation
-        // Suppress TypeScript error, assuming 'fetch' might be a valid runtime option
-        // @ts-ignore 
-        agent = new BskyAgent({
-             service: account.pdsUrl, // PDS URL is mandatory
-             fetch: boundFetch        // Provide the DPoP-aware fetch
+        // --- BEGIN MODIFICATION (Revert to simpler init) ---
+        // 1. Create agent WITHOUT custom fetch
+        const agent = new BskyAgent({
+          service: account.pdsUrl
         });
-        
-        // Manually set the agent's DID and handle if needed for internal logic
-        // (Agent might not populate these automatically without resumeSession)
-        // Note: Check if agent properties like agent.ctx.actor are set automatically
-        // or if we need to manually inform the agent of its identity.
-        // For now, assume the fetch function implicitly handles identity via tokens.
-        console.log(`Agent created for ${account.handle}.`);
 
-        // Assume agent is ready if creation succeeded
-        console.log(`Agent initialized successfully for ${account.handle} using custom DPoP fetch.`);
-        activeAgents[account.did] = agent; // Store the active agent
-        activeAgentCount++; // Count successfully initialized agents
-          
-        // Start polling directly with the configured agent
+        // 2. Manually populate the session object 
+        // This is necessary for checks like startPollingForAccount
+        const sessionData = {
+            did: account.did,
+            handle: account.handle,
+            accessJwt: account.accessJwt,
+            refreshJwt: account.refreshJwt,
+        };
+        agent.session = sessionData; 
+        console.log(`[Initialize] Manually set agent.session for ${account.handle}.`);
+
+        // 3. SKIP agent.resumeSession() entirely
+        console.log(`[Initialize] Skipping agent.resumeSession for ${account.handle}.`);
+
+        // 4. Add agent and start polling 
+        activeAgents[account.did] = agent;
+        console.log(`Agent created for ${account.handle} (NO custom fetch assigned yet).`);
         startPollingForAccount(account, agent); 
+        activeAgentCount++;
+        // --- END MODIFICATION ---
 
       } catch (error) {
-        console.error(`Error during agent initialization for ${account.handle}:`, error);
+        console.error(`Failed to initialize agent for ${account.handle} (${account.did}):`, error);
+        // Optionally remove account from storage if init fails critically?
+        // await deactivateAccount(account.did); 
       }
-    }
+    } // End for loop
 
   } catch (error) {
       console.error('Error initializing accounts:', error);
@@ -312,7 +313,7 @@ function setServerNonce(origin: string, nonce: string | null): void {
 
 // --- DPoP Authenticated Fetch Helper (Modified for Agent) ---
 // Now takes standard fetch arguments and expects 'this' to be the Account
-async function agentFetchWithDpop(
+export async function agentFetchWithDpop(
     this: Account, // Bind Account context here
     input: RequestInfo | URL,
     init?: RequestInit
@@ -369,6 +370,12 @@ async function agentFetchWithDpop(
             const accessToken = account.accessJwt;
             let currentNonce = getServerNonce(targetOrigin);
 
+            // --- BEGIN LOGGING ---
+            console.log(`[agentFetchWithDpop DEBUG] Using access token: ${accessToken.substring(0, 10)}...${accessToken.substring(accessToken.length - 10)}`);
+            console.log(`[agentFetchWithDpop DEBUG] Using private JWK: ${JSON.stringify(account.dpopPrivateKeyJwk).substring(0, 50)}...`);
+            console.log(`[agentFetchWithDpop DEBUG] Using public JWK: ${JSON.stringify(account.dpopPublicKeyJwk).substring(0, 50)}...`);
+            // --- END LOGGING ---
+
             // Attempt 1
             const dpopProof1 = await createDpopProof(urlStr, options.method || 'GET', privateKey, publicJwk, accessToken, currentNonce || undefined);
             // Create new Headers object based on existing options.headers
@@ -377,6 +384,11 @@ async function agentFetchWithDpop(
             headers1.set('DPoP', dpopProof1);
             // Create a new options object for the fetch call
             const options1 = { ...options, headers: headers1 };
+
+            // --- BEGIN LOGGING ---
+            console.log(`[agentFetchWithDpop DEBUG Attempt 1] DPoP Proof: ${dpopProof1.substring(0,15)}...`);
+            console.log(`[agentFetchWithDpop DEBUG Attempt 1] Headers:`, Object.fromEntries(headers1.entries()));
+            // --- END LOGGING ---
 
             console.log(`[agentFetchWithDpop Attempt 1] Nonce: ${currentNonce ? 'Yes' : 'No'}`);
             let response = await fetch(urlStr, options1);
@@ -397,6 +409,11 @@ async function agentFetchWithDpop(
                 headers2.set('DPoP', dpopProof2);
                  // Create a new options object for the second fetch call
                 const options2 = { ...options, headers: headers2 };
+
+                // --- BEGIN LOGGING ---
+                console.log(`[agentFetchWithDpop DEBUG Attempt 2] DPoP Proof: ${dpopProof2.substring(0,15)}...`);
+                console.log(`[agentFetchWithDpop DEBUG Attempt 2] Headers:`, Object.fromEntries(headers2.entries()));
+                // --- END LOGGING ---
 
                 console.log(`[agentFetchWithDpop Attempt 2] Nonce: Yes`);
                 response = await fetch(urlStr, options2);

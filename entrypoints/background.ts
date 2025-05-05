@@ -6,8 +6,18 @@ import {
   stopNotificationPolling, 
   updateNotificationBadge,
   resetNotificationCount,
-  stopAllPolling
+  stopAllPolling,
+  getNotificationCountForAccount,
+  getTotalNotificationCount,
+  getRecentNotificationsForAccount
 } from '../src/services/notifications';
+import {
+  startChatPolling,
+  stopChatPolling,
+  stopAllChatPolling,
+  getMessageCountForAccount,
+  getTotalMessageCount
+} from '../src/services/chat';
 
 // Constants for OAuth Token Exchange (Server Flow)
 const BLUESKY_SERVICE = 'https://bsky.social'; 
@@ -24,7 +34,8 @@ const AUTH_FINALIZE_URL_PATH = '/api/auth/extension-callback';
 // Store for authenticated accounts AND their agent instances
 let activeAgents: Record<string, BskyAgent> = {};
 // Store polling intervals
-const pollingIntervals: Record<string, number> = {};
+const notificationPollingIntervals: Record<string, number> = {};
+const chatPollingIntervals: Record<string, number> = {};
 
 // Store for DPoP keys (in memory for this session)
 const dpopKeys: Record<string, CryptoKeyPair> = {};
@@ -150,21 +161,34 @@ function startPollingForAccount(
       console.error(`Attempted to start polling for ${account.did} without a valid agent session.`);
       return;
   }
-  // Stop any previous polling for this account
-  stopNotificationPolling(account.did, pollingIntervals); 
+  // Stop any previous polling for this account - REMOVED, stopAllPolling handles this at init start
+  // stopNotificationPolling(account.did, notificationPollingIntervals); 
   
   console.log(`Starting notification polling for ${account.handle} (${account.did}) using agent session`);
   try {
-      // Call startNotificationPolling with the account AND the existing agent
-      // This assumes notifications.ts is updated to accept the agent again
+      // Call startNotificationPolling - no interval argument needed
       const intervalId = startNotificationPolling(account, agent); 
       if (intervalId === -1) {
           console.error(`Polling failed to start for ${account.did} (received interval ID -1)`);
           return; // Don't store invalid interval ID
       }
       // Store the returned interval ID
-      pollingIntervals[account.did] = intervalId;
+      notificationPollingIntervals[account.did] = intervalId;
       console.log(`Polling started for ${account.did} with interval ID: ${intervalId}`);
+      
+      // --- Start chat polling as well ---
+      console.log(`[Background] Starting chat polling for ${account.handle} (${account.did})`);
+      // Call startChatPolling - Pass the chat polling map
+      const chatIntervalId = startChatPolling(account, chatPollingIntervals);
+      if (chatIntervalId) { // Check if interval started successfully
+          // No need to store here, startChatPolling does it now
+          // chatPollingIntervals[account.did] = chatIntervalId;
+          console.log(`[Background] Chat polling started for ${account.did} with interval ID: ${chatIntervalId}`);
+      } else {
+          console.error(`[Background] Chat polling failed to start for ${account.did}`);
+      }
+      // ----------------------------------
+
   } catch (error) {
       console.error(`Failed to start polling for ${account.did}:`, error);
   }
@@ -172,16 +196,24 @@ function startPollingForAccount(
 
 // Stop notification polling for an account
 function stopPollingForAccount(did: string): void {
-  if (pollingIntervals[did]) {
+  if (notificationPollingIntervals[did]) {
     // stopNotificationPolling expects the map as the second argument
-    stopNotificationPolling(did, pollingIntervals);
+    stopNotificationPolling(did, notificationPollingIntervals);
     // It should handle deleting the entry from the map internally
-    // delete pollingIntervals[did]; // Remove this line
-    console.log(`Stopped polling for ${did}`);
+    // delete notificationPollingIntervals[did]; // Remove this line
+    console.log(`Stopped notification polling for ${did}`);
   } else {
-      // Keep this warning
-    // console.warn(`No active polling interval found for ${did} to stop.`);
+    // console.warn(`No active notification polling interval found for ${did} to stop.`);
   }
+  
+  // --- Stop chat polling as well ---
+  if (chatPollingIntervals[did]) {
+    stopChatPolling(did, chatPollingIntervals);
+    console.log(`Stopped chat polling for ${did}`);
+  } else {
+    // console.warn(`No active chat polling interval found for ${did} to stop.`);
+  }
+  // ----------------------------------
 }
 
 // Function to deactivate an account (stop polling, remove agent)
@@ -232,7 +264,8 @@ async function initializeAccounts(): Promise<void> {
     const accounts = Object.values(accountsRecord); // Get array of accounts
     
     // Stop any existing polling before re-initializing
-    stopAllPolling(pollingIntervals); // Pass the map here
+    stopAllPolling(notificationPollingIntervals); // Pass the map here (renamed)
+    stopAllChatPolling(chatPollingIntervals); // Stop chat polling too
     // Clear active agents (we will rebuild based on successful session activation)
     activeAgents = {}; 
 
@@ -274,7 +307,7 @@ async function initializeAccounts(): Promise<void> {
         // 4. Add agent and start polling 
         activeAgents[account.did] = agent;
         console.log(`Agent created for ${account.handle} (NO custom fetch assigned yet).`);
-        startPollingForAccount(account, agent); 
+        startPollingForAccount(account, agent); // This now starts both notification and chat polling
         activeAgentCount++;
         // --- END MODIFICATION ---
 
@@ -507,15 +540,12 @@ export default defineBackground({
     browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
       console.log('Background received message:', message.type, 'from', sender.tab?.id || sender.url || sender.id);
 
-      // --- REMOVED: Handler for EXCHANGE_CODE --- 
-      /*
-      if (message.type === 'EXCHANGE_CODE') {
-        // ... removed logic ...
-        return true; 
-      }
-      */
-      
-      // --- NEW: Handler for GET_CODE_VERIFIER request from content script ---
+      // --- REMOVED: Old Handlers (OAuth Exchange, PKCE Exchange) --- 
+      // Ensure these are completely gone if not used
+
+      // --- Current Active Handlers ---
+
+      // PKCE Verifier Retrieval (for content script)
       if (message.type === 'GET_CODE_VERIFIER') {
         const { state } = message.data || {};
         if (!state) {
@@ -546,7 +576,7 @@ export default defineBackground({
         return true; // Indicate async response
       }
       
-      // --- NEW: Handler for OAUTH_TOKEN_RECEIVED ---
+      // OAuth Token Processing (from content script)
       if (message.type === 'OAUTH_TOKEN_RECEIVED') {
         const tokenData = message.data; // Now includes tokens AND potentially DPoP JWKs
         
@@ -729,27 +759,92 @@ export default defineBackground({
         return false;
       }
       
-      // Other message handlers (GET_ACCOUNTS, REMOVE_ACCOUNT, etc. - keep as is)
-      if (message.type === 'GET_ACCOUNTS') {
-          // ... existing logic ...
-          return false;
+      // --- Popup Data Handlers ---
+      if (message.type === 'GET_ACCOUNTS_AND_COUNTS') {
+        // Consolidate fetching accounts and their counts
+        (async () => {
+          try {
+            const accounts = await loadAccounts(); // Get Record<string, Account>
+            const accountsWithCounts = Object.values(accounts).map(acc => ({
+                ...acc,
+                notificationCount: getNotificationCountForAccount(acc.did),
+                messageCount: getMessageCountForAccount(acc.did)
+            }));
+            if (sendResponse) sendResponse({ success: true, accounts: accountsWithCounts });
+          } catch (error) {
+             console.error('[Background][GET_ACCOUNTS_AND_COUNTS] Error:', error);
+             if (sendResponse) sendResponse({ success: false, error: 'Failed to load accounts' });
+          }
+        })();
+        return true; // Indicate async response
       }
-      
+
+      if (message.type === 'GET_RECENT_NOTIFICATIONS') {
+        const { did } = message.data || {};
+        if (!did) {
+          if (sendResponse) sendResponse({ success: false, error: 'Missing DID' });
+          return false;
+        }
+        const notifications = getRecentNotificationsForAccount(did);
+        // We might need to simplify the notification objects before sending
+        // to avoid issues with complex objects or circular references.
+        const simplifiedNotifications = notifications.map(n => ({
+            cid: n.cid,
+            uri: n.uri,
+            reason: n.reason,
+            isRead: n.isRead,
+            indexedAt: n.indexedAt,
+            authorHandle: n.author?.handle,
+            authorAvatar: n.author?.avatar,
+            // Simplify record if needed, or omit for popup
+            // record: n.record ? { $type: n.record.$type } : undefined 
+        }));
+        if (sendResponse) sendResponse({ success: true, notifications: simplifiedNotifications });
+        return false; // Sync response is fine here
+      }
+      // --------------------------
+
       if (message.type === 'NOTIFICATION_VIEW') {
-          // ... existing logic ...
+          const { did } = message.data;
+          if (did) {
+            resetNotificationCount(did); // Reset count in notification service
+          }
           return false;
       }
       
       if (message.type === 'REMOVE_ACCOUNT') {
-          // ... existing logic ...
-          return true; // Indicate async response
+        const { did } = message.data;
+        if (!did) {
+          if (sendResponse) sendResponse({ success: false, error: 'Missing DID' });
+          return false; 
+        }
+        (async () => {
+          try {
+            await deactivateAccount(did);
+            if (sendResponse) sendResponse({ success: true });
+          } catch (error) {
+            console.error(`[Background] Error removing account ${did}:`, error);
+            if (sendResponse) sendResponse({ success: false, error: 'Failed to remove account' });
+          }
+        })();
+        return true; // Indicate async response
       }
       
       if (message.type === 'GET_AUTH_STATUS') {
-          // ... existing logic ...
-          return false;
+        // Respond with whether any accounts are active (have agents)
+        const isAuthenticated = Object.keys(activeAgents).length > 0;
+        if (sendResponse) sendResponse({ isAuthenticated });
+        return false;
       }
       
+      // --- Options Page Opener ---
+      if (message.type === 'OPEN_OPTIONS_PAGE') {
+        browser.runtime.openOptionsPage();
+        if (sendResponse) sendResponse({ success: true });
+        return false;
+      }
+      // ---------------------------
+
       console.warn('Unhandled message type in background:', message.type);
       return false; 
     });

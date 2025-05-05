@@ -1,142 +1,205 @@
-import React, { useState, useEffect } from 'react';
-import './App.css';
+import { useState, useEffect } from 'react';
+import './App.css'; // Use App.css instead of Popup.css
+import { Account } from '../../src/services/auth'; // Import Account type
 
-// --- Constants for Auth Server Flow ---
-const AUTH_SERVER_BASE_URL = 'https://notisky.symm.app'; // Updated URL
-// const AUTH_SERVER_BASE_URL = 'http://localhost:3001'; // For local testing
-const AUTH_INITIATE_ENDPOINT = `${AUTH_SERVER_BASE_URL}/api/auth/ext-auth`;
-
-interface AccountInfo {
-  did: string;
-  handle: string;
+// Interface for account data including counts
+interface AccountWithCounts extends Account {
+  notificationCount: number;
+  messageCount: number;
 }
 
-function PopupApp() {
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null); // null = loading
-  const [accounts, setAccounts] = useState<AccountInfo[]>([]);
+// Interface for simplified notification data for the popup
+interface SimpleNotification {
+  cid: string;
+  uri: string;
+  reason: string;
+  isRead: boolean;
+  indexedAt: string;
+  authorHandle?: string;
+  authorAvatar?: string;
+}
+
+// Renamed function to App
+function App() { 
+  const [accounts, setAccounts] = useState<AccountWithCounts[]>([]);
+  const [selectedDid, setSelectedDid] = useState<string | null>(null);
+  const [recentNotifications, setRecentNotifications] = useState<SimpleNotification[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Check auth status and load accounts on mount
+  // Fetch initial data
   useEffect(() => {
-    const checkAuth = async () => {
+    const fetchData = async () => {
+      setIsLoading(true);
+      setError(null);
       try {
-        console.log('[Popup] Checking authentication status...');
-        const statusResponse = await browser.runtime.sendMessage({ type: 'GET_AUTH_STATUS' });
-        console.log('[Popup] Auth status response:', statusResponse);
-        setIsAuthenticated(statusResponse?.isAuthenticated || false);
-
-        if (statusResponse?.isAuthenticated) {
-          console.log('[Popup] Fetching account details...');
-          const accountsResponse = await browser.runtime.sendMessage({ type: 'GET_ACCOUNTS' });
-          console.log('[Popup] Accounts response:', accountsResponse);
-          setAccounts(accountsResponse?.accounts || []);
+        // Use the correct message type
+        const response = await browser.runtime.sendMessage({ type: 'GET_ACCOUNTS_AND_COUNTS' }); 
+        if (response && response.success && Array.isArray(response.accounts)) {
+          setAccounts(response.accounts);
+          // Select the first account by default if available
+          if (response.accounts.length > 0) {
+            const firstDid = response.accounts[0].did;
+            setSelectedDid(firstDid);
+            // Fetch recent notifications for the initially selected account
+            fetchRecentNotifications(firstDid);
+          } else {
+            setIsLoading(false); // No accounts, stop loading
+          }
+        } else {
+          throw new Error(response?.error || 'Failed to fetch accounts');
         }
-      } catch (err: any) {
-        console.error('[Popup] Error checking auth status or getting accounts:', err);
-        setError(`Error loading status: ${err.message}`);
-        setIsAuthenticated(false); // Assume not authenticated on error
+      } catch (err) {
+        console.error("Error fetching initial data:", err);
+        setError(err instanceof Error ? err.message : String(err));
+        setIsLoading(false);
       }
     };
-    checkAuth();
-  }, []);
+    fetchData();
 
-  // Listener for completion message from background (if login finishes while popup is open)
-  useEffect(() => {
-    const handleMessage = (message: any, sender: browser.runtime.MessageSender) => {
-       if (sender.id !== browser.runtime.id || sender.url?.includes('/popup.html')) return;
-       
-       console.log('[Popup] Received message:', message);
-       if (message.type === 'OAUTH_COMPLETE') {
-          if (message.success && message.account) {
-            // Login succeeded, update UI
-            setIsAuthenticated(true);
-            // Avoid duplicates if account is already listed (though GET_ACCOUNTS should handle this)
-            setAccounts(prev => prev.some(a => a.did === message.account.did) ? prev : [...prev, message.account]);
-            setError(null);
-            // Optionally close popup after success
-            // setTimeout(() => window.close(), 1500);
-          } else if (!message.success) {
-            // Login failed
-            setError(`Login failed: ${message.error || 'Unknown error'}`);
-            setIsAuthenticated(false);
-          }
-       }
-       // Optional: Listen for REMOVE_ACCOUNT if needed
+    // Listener for updates from background
+    const messageListener = (message: any) => {
+      if (message.type === 'NOTIFICATION_COUNT_UPDATED') {
+        setAccounts(prev => prev.map(acc => 
+          acc.did === message.data.did ? { ...acc, notificationCount: message.data.count } : acc
+        ));
+      }
+      if (message.type === 'MESSAGE_COUNT_UPDATED') {
+        setAccounts(prev => prev.map(acc => 
+          acc.did === message.data.did ? { ...acc, messageCount: message.data.count } : acc
+        ));
+      }
+      // Potentially add listener for RECENT_NOTIFICATIONS_UPDATED if needed
     };
-    browser.runtime.onMessage.addListener(handleMessage);
-    return () => browser.runtime.onMessage.removeListener(handleMessage);
+    browser.runtime.onMessage.addListener(messageListener);
+
+    // Cleanup listener on unmount
+    return () => {
+      browser.runtime.onMessage.removeListener(messageListener);
+    };
   }, []);
 
-  const handleOpenLogin = () => {
-    console.log('[Popup] Opening login page...');
+  // Fetch recent notifications when selected account changes
+  useEffect(() => {
+    if (selectedDid) {
+      fetchRecentNotifications(selectedDid);
+    }
+  }, [selectedDid]);
+
+  const fetchRecentNotifications = async (did: string) => {
+    setIsLoading(true); // Indicate loading notifications
+    try {
+      const response = await browser.runtime.sendMessage({ 
+        type: 'GET_RECENT_NOTIFICATIONS',
+        data: { did }
+      });
+      if (response && response.success && Array.isArray(response.notifications)) {
+        setRecentNotifications(response.notifications);
+      } else {
+        console.warn('Failed to fetch recent notifications:', response?.error);
+        setRecentNotifications([]); // Clear notifications on failure
+      }
+    } catch (err) {
+      console.error(`Error fetching recent notifications for ${did}:`, err);
+      setRecentNotifications([]); // Clear notifications on error
+    } finally {
+      setIsLoading(false); // Finished loading notifications
+    }
+  };
+
+  const handleAccountChange = (event: React.ChangeEvent<HTMLSelectElement>) => {
+    setSelectedDid(event.target.value);
+  };
+
+  const handleOpenOptions = () => {
+    browser.runtime.sendMessage({ type: 'OPEN_OPTIONS_PAGE' });
+  };
+  
+  // --- NEW: Function to open login page ---
+  const handleAddAccount = () => {
     const loginUrl = browser.runtime.getURL("/login.html");
     browser.tabs.create({ url: loginUrl, active: true });
-    window.close(); // Close the popup after opening the login tab
+    window.close(); // Close popup after opening login tab
+  };
+  // ----------------------------------------
+
+  const handleOpenLink = (url: string) => {
+    browser.tabs.create({ url });
   };
 
-  const handleLogout = async (did: string) => {
-    try {
-      console.log(`[Popup] Requesting logout for ${did}`);
-      await browser.runtime.sendMessage({ type: 'REMOVE_ACCOUNT', data: { removeDid: did } });
-      // Update UI immediately
-      setAccounts(prev => prev.filter(acc => acc.did !== did));
-      if (accounts.length === 1) { // If it was the last account
-          setIsAuthenticated(false);
-      }
-      console.log(`[Popup] Logout request sent for ${did}`);
-    } catch (err: any) {
-        console.error('[Popup] Error sending logout request:', err);
-        setError(`Logout failed: ${err.message}`);
-    }
-  };
+  const selectedAccount = accounts.find(acc => acc.did === selectedDid);
 
-  // Render Logic
-  const renderContent = () => {
-    if (isAuthenticated === null) {
-      return <p>Loading...</p>;
-    }
-
-    if (error) {
-      return <div className="error-message">{error}</div>;
-    }
-
-    if (isAuthenticated && accounts.length > 0) {
-      return (
-        <div>
-          <h2>Authenticated Accounts:</h2>
-          <ul className="account-list">
-            {accounts.map(acc => (
-              <li key={acc.did}>
-                <span>{acc.handle}</span>
-                <button onClick={() => handleLogout(acc.did)} className="logout-button">Logout</button>
-              </li>
-            ))}
-          </ul>
-        </div>
-      );
-    } else {
-      return (
-        <div className="login-prompt">
-          <p>Please sign in to enable Notisky features.</p>
-          <button onClick={handleOpenLogin} className="login-button">
-            Sign in with Bluesky
-          </button>
-        </div>
-      );
+  // Helper to format notification text
+  const formatNotificationText = (notif: SimpleNotification): string => {
+    const handle = notif.authorHandle ? `@${notif.authorHandle}` : 'Someone';
+    switch (notif.reason) {
+      case 'like': return `${handle} liked your post`;
+      case 'repost': return `${handle} reposted your post`;
+      case 'follow': return `${handle} followed you`;
+      case 'mention': return `${handle} mentioned you`;
+      case 'reply': return `${handle} replied to your post`;
+      case 'quote': return `${handle} quoted your post`;
+      default: return `New notification (${notif.reason})`;
     }
   };
 
   return (
-    <div className="App">
-      <div className="header">
-          <img src="../icon/48.png" alt="Notisky Logo" style={{ width: 24, height: 24, marginRight: 8 }} />
-          <h1>Notisky</h1>
-      </div>
-      <div className="content">
-         {renderContent()}
+    <div className="popup-container">
+      <header>
+        <h1>Notisky</h1>
+        <button onClick={handleAddAccount} className="add-account-button" title="Add Account">➕</button>
+        <button onClick={handleOpenOptions} className="options-button" title="Open Settings">⚙️</button>
+      </header>
+
+      {error && <p className="error-message">Error: {error}</p>}
+
+      {accounts.length > 0 ? (
+        <div className="account-section">
+          <select onChange={handleAccountChange} value={selectedDid || ''} aria-label="Select Account">
+            {accounts.map(acc => (
+              <option key={acc.did} value={acc.did}>
+                @{acc.handle}
+              </option>
+            ))}
+          </select>
+
+          {selectedAccount && (
+            <div className="counts-section">
+              <button onClick={() => handleOpenLink('https://bsky.app/notifications')} className="count-link">
+                Notifications: <span className="count">{selectedAccount.notificationCount}</span>
+              </button>
+              <button onClick={() => handleOpenLink('https://bsky.app/messages')} className="count-link">
+                 Messages: <span className="count">{selectedAccount.messageCount}</span>
+              </button>
+            </div>
+          )}
+        </div>
+      ) : (
+        !isLoading && <p>No accounts logged in. Please log in via the options page.</p>
+      )}
+
+      <div className="notifications-log">
+        <h2>Recent Notifications</h2>
+        {isLoading && !error && <p>Loading...</p>}
+        {!isLoading && recentNotifications.length > 0 && (
+          <ul>
+            {recentNotifications.map(notif => (
+              <li key={notif.cid} className={notif.isRead ? 'read' : 'unread'}>
+                {/* Basic display, could add avatar, timestamp, link later */}
+                <span>{formatNotificationText(notif)}</span>
+                {/* Example link (needs construction based on URI/reason) 
+                <button onClick={() => handleOpenLink(`https://bsky.app/profile/${notif.authorHandle}/post/${notif.uri?.split('/').pop()}`)}>View</button> 
+                */}
+              </li>
+            ))}
+          </ul>
+        )}
+        {!isLoading && recentNotifications.length === 0 && selectedAccount && (
+          <p>No recent notifications found for @{selectedAccount.handle}.</p>
+        )}
       </div>
     </div>
   );
 }
 
-export default PopupApp;
+export default App; // Export App as default

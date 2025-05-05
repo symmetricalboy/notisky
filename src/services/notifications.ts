@@ -8,11 +8,15 @@ import { Account } from './auth';
 // Adjust path as necessary based on file structure
 import { agentFetchWithDpop } from '../../entrypoints/background';
 
+// Define a clearer type for notifications for internal use
+type Notification = AtprotoAPI.AppBskyNotificationListNotifications.Notification;
+
 // Store for notification counts per account
 const notificationCounts: Record<string, number> = {};
 
-// Store for last notification timestamp per account
-const lastNotificationTimestamps: Record<string, string> = {};
+// Store for recent notifications per account (capped)
+const recentNotifications: Record<string, Notification[]> = {};
+const MAX_RECENT_NOTIFICATIONS = 10; // Keep the last 10 notifications
 
 // Default polling interval (1000ms)
 const DEFAULT_POLLING_INTERVAL = 1000;
@@ -22,18 +26,17 @@ const DEFAULT_POLLING_INTERVAL = 1000;
  */
 export function startNotificationPolling(
   account: Account, 
-  agent: BskyAgent, // Accept the full agent again
-  interval = DEFAULT_POLLING_INTERVAL
+  agent: BskyAgent // Accept the full agent again
 ): number {
   
   console.log(`[Notifications] Starting polling for ${account.handle} using agent`);
   // Initial fetch 
   fetchNotifications(account, agent); // Pass account and agent
   
-  // Set up interval for regular polling
+  // Set up interval for regular polling using the default constant
   const intervalId = setInterval(() => {
     fetchNotifications(account, agent); // Pass account and agent
-  }, interval);
+  }, DEFAULT_POLLING_INTERVAL); // Use constant directly
   
   console.log(`[Notifications] Polling interval ${intervalId} started for ${account.did}`);
   return intervalId;
@@ -73,17 +76,12 @@ async function fetchNotifications(
 ): Promise<void> {
   
   try {
-    const lastSeenAt = lastNotificationTimestamps[account.did] || undefined;
-    
-    // Construct parameters and URL for manual fetch
+    // Construct parameters and URL for manual fetch - WITHOUT seenAt
     const params = new URLSearchParams({
         limit: '50' // URLSearchParams needs string values
     });
-    if (lastSeenAt) {
-        params.set('seenAt', lastSeenAt);
-    }
 
-    console.log(`[Notifications] Fetching for ${account.handle} via agent:`, params);
+    console.log(`[Notifications] Fetching for ${account.handle} via agent (no seenAt):`, params);
     
     // Construct the full URL for the XRPC endpoint
     const listNotificationsUrl = `${account.pdsUrl}/xrpc/app.bsky.notification.listNotifications?${params.toString()}`;
@@ -109,10 +107,23 @@ async function fetchNotifications(
     // Parse the JSON response body
     const responseData: AtprotoAPI.AppBskyNotificationListNotifications.OutputSchema = await response.json(); 
     
+    // --- Store Recent Notifications --- 
+    if (responseData.notifications && responseData.notifications.length > 0) {
+        if (!recentNotifications[account.did]) {
+            recentNotifications[account.did] = [];
+        }
+        // Add new notifications to the beginning and slice to keep the max count
+        recentNotifications[account.did] = [
+            ...responseData.notifications, 
+            ...recentNotifications[account.did]
+        ].slice(0, MAX_RECENT_NOTIFICATIONS);
+        // Consider filtering duplicates if necessary, but assuming listNotifications is chronological
+    }
+    // ---------------------------------
+
     // Get only unread notifications
     const unreadNotifications = responseData.notifications.filter(
-      // Use the correct type from the imported namespace
-      (notification: AtprotoAPI.AppBskyNotificationListNotifications.Notification) => !notification.isRead 
+      (notification: Notification) => !notification.isRead 
     );
     
     // Store the current notification count
@@ -137,15 +148,6 @@ async function fetchNotifications(
           // Count decreased, likely marked as read elsewhere. Log it.
           console.log(`[Notifications] Unread count decreased for ${account.handle} (Read elsewhere?).`);
       }
-      
-      // Update last seen timestamp ONLY if we fetched some notifications
-      // Use the timestamp of the LATEST notification fetched as the new 'seenAt' marker
-      // to avoid potential race conditions or missed notifications.
-      // This requires the agent response to include the necessary timestamp or cursor.
-      // Using current time might mark future notifications as seen.
-      // Let's stick to Date().toISOString() for now but acknowledge limitation.
-      lastNotificationTimestamps[account.did] = new Date().toISOString(); 
-      console.log(`[Notifications] Updated lastSeen timestamp for ${account.handle} to ${lastNotificationTimestamps[account.did]}`);
 
     } else {
       console.log(`[Notifications] No new unread notifications found for ${account.handle}`);
@@ -160,7 +162,10 @@ async function fetchNotifications(
         handle: account.handle,
         count: currentCount // Send the current total unread count
       }
-    }).catch(err => console.log("Error sending NOTIFICATION_COUNT_UPDATED message:", err)); // Add catch
+    }).catch(err => {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      console.log(`Error sending NOTIFICATION_COUNT_UPDATED message: ${errorMessage}`); 
+    }); // Log error more reliably
 
   } catch (error) {
     let errorMessage = 'Unknown error';
@@ -231,6 +236,13 @@ export function getTotalNotificationCount(): number {
  */
 export function getNotificationCountForAccount(did: string): number {
   return notificationCounts[did] || 0;
+}
+
+/**
+ * Get recent notifications for a specific account
+ */
+export function getRecentNotificationsForAccount(did: string): Notification[] {
+  return recentNotifications[did] || [];
 }
 
 /**

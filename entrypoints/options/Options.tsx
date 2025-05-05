@@ -1,16 +1,12 @@
 import { useState, useEffect } from 'react';
 
 function Options() {
-  const [pollingInterval, setPollingInterval] = useState(1000);
   const [showNotificationContent, setShowNotificationContent] = useState(true);
   
   useEffect(() => {
     // Load settings from storage
     browser.storage.local.get(['settings']).then((result) => {
       if (result.settings) {
-        if (result.settings.pollingInterval) {
-          setPollingInterval(result.settings.pollingInterval);
-        }
         if (result.settings.showNotificationContent !== undefined) {
           setShowNotificationContent(result.settings.showNotificationContent);
         }
@@ -22,7 +18,6 @@ function Options() {
     // Save settings to storage
     browser.storage.local.set({
       settings: {
-        pollingInterval,
         showNotificationContent,
       }
     }).then(() => {
@@ -40,25 +35,6 @@ function Options() {
   return (
     <div className="options-container">
       <h1>Notisky Settings</h1>
-      
-      <div className="option-group">
-        <label htmlFor="pollingInterval">
-          Notification Polling Interval (ms):
-        </label>
-        <input
-          type="number"
-          id="pollingInterval"
-          min="1000"
-          max="60000"
-          step="1000"
-          value={pollingInterval}
-          onChange={(e) => setPollingInterval(Number(e.target.value))}
-        />
-        <p className="help-text">
-          How often to check for new notifications (min: 1000ms, max: 60000ms).
-          Lower values mean more frequent updates but higher resource usage.
-        </p>
-      </div>
       
       <div className="option-group">
         <label htmlFor="showNotificationContent">

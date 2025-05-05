@@ -6,6 +6,9 @@ export interface Account {
   email?: string;
   refreshJwt: string; // Must be stored securely
   accessJwt: string;  // Must be stored securely
+  dpopPrivateKeyJwk?: object; // Store exported private key JWK
+  dpopPublicKeyJwk?: object;  // Store exported public key JWK
+  pdsUrl?: string; // Store the user's PDS endpoint URL
 }
 
 const BLUESKY_SERVICE = 'https://bsky.social';
@@ -122,13 +125,21 @@ export async function saveAccount(account: Account): Promise<void> {
   try {
     const { accounts = {} } = await browser.storage.local.get('accounts');
     // Basic validation before saving
-    if (!account || !account.did || !account.handle || !account.accessJwt || !account.refreshJwt) {
-      console.error('Attempted to save invalid account structure:', account);
+    if (!account || !account.did || !account.handle || !account.accessJwt || !account.refreshJwt || !account.pdsUrl) {
+      console.error('Attempted to save invalid or incomplete account structure:', account);
       return; // Do not save invalid account
     }
-    accounts[account.did] = account;
+    // Ensure DPoP keys are included if present
+    const accountToSave: Account = { ...account };
+    if (!account.dpopPrivateKeyJwk || !account.dpopPublicKeyJwk) {
+        // If keys are missing log a warning, but allow saving
+        console.warn(`Account ${account.did} being saved without full DPoP keys.`);
+        // Allow saving even without DPoP keys for now, but PDS URL is mandatory
+    }
+
+    accounts[account.did] = accountToSave;
     await browser.storage.local.set({ accounts });
-    console.log(`Account saved/updated for ${account.did}`);
+    console.log(`Account saved/updated for ${account.did} (PDS: ${account.pdsUrl})`);
   } catch (error) {
     console.error('Error saving account', account.did, error);
   }
@@ -204,7 +215,10 @@ export async function tokenResponseToAccount(tokenData: any): Promise<Account | 
       handle: profile.handle, // Get handle from profile 
       refreshJwt: tokenData.refresh_token, // Store the tokens from the response
       accessJwt: tokenData.access_token,  
-      email: profile.email as string | undefined // Cast to the correct type
+      email: profile.email as string | undefined, // Cast to the correct type
+      dpopPrivateKeyJwk: agent.session.dpopPrivateKeyJwk, // Include DPoP key
+      dpopPublicKeyJwk: agent.session.dpopPublicKeyJwk, // Include DPoP key
+      pdsUrl: profile.pdsUrl as string | undefined, // Include PDS URL from profile
     };
     console.log(`tokenResponseToAccount: Account created/updated for handle: ${account.handle}`);
     return account;

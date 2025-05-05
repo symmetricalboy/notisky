@@ -103,34 +103,35 @@ function processCallback() {
         .then(function(fetchResponse) {
           return fetchResponse.json();
         })
-        .then(function(tokenData) {
-          if (tokenData.error) {
-            console.error('[auth-finalize-cs] Token exchange failed:', tokenData.error);
-            updateUI(false, `Authentication failed: ${tokenData.error_description || tokenData.error}`);
+        .then(function(tokenResponseData) {
+          // Check for errors from the auth server token exchange
+          if (tokenResponseData.error) {
+            console.error('[auth-finalize-cs] Error from auth server token exchange:', tokenResponseData);
+            updateUI(false, `Authentication failed: ${tokenResponseData.error_description || tokenResponseData.error}`);
+            // Send error details to background?
+             browser.runtime.sendMessage({ type: 'OAUTH_TOKEN_RECEIVED', data: { error: tokenResponseData.error, error_description: tokenResponseData.error_description } });
             return;
           }
           
-          console.log('[auth-finalize-cs] Token exchange successful, sending tokens to extension');
-          // Now send the tokens to the extension
-          browser.runtime.sendMessage({
-            type: 'OAUTH_TOKEN_RECEIVED',
-            data: tokenData
-          }).then(function(finalResponse) {
-            console.log('[auth-finalize-cs] Extension processed tokens:', finalResponse);
-            
-            if (finalResponse && finalResponse.success) {
-              updateUI(true, 'Successfully authenticated! You can close this window.');
-              // Auto-close after a delay
-              setTimeout(function() {
-                window.close();
-              }, 3000);
-            } else {
-              updateUI(false, (finalResponse && finalResponse.error) || 'Unknown error saving authentication');
-            }
-          }).catch(function(err) {
-            console.error('[auth-finalize-cs] Error sending tokens to extension:', err);
-            updateUI(false, 'Error communicating with extension');
-          });
+          // Send the received token data (including potentially DPoP keys) to the background script
+          console.log('[auth-finalize-cs] Token exchange successful, sending data to background script:', tokenResponseData);
+          updateUI(true, 'Authentication successful! Processing session...');
+          
+          browser.runtime.sendMessage({ type: 'OAUTH_TOKEN_RECEIVED', data: tokenResponseData })
+            .then(function(bgResponse) {
+              if (bgResponse && bgResponse.success) {
+                 console.log('[auth-finalize-cs] Background script processed tokens successfully.');
+                 updateUI(true, 'Authentication complete! You can close this window.');
+                 setTimeout(window.close, 1500);
+              } else {
+                 console.error('[auth-finalize-cs] Background script reported error:', bgResponse?.error);
+                 updateUI(false, `Authentication finalization failed: ${bgResponse?.error || 'Unknown error from extension'}`);
+              }
+            })
+            .catch(function(err) {
+              console.error('[auth-finalize-cs] Error communicating with background script:', err);
+              updateUI(false, 'Authentication failed: Error contacting extension background.');
+            });
         })
         .catch(function(err) {
           console.error('[auth-finalize-cs] Error during token exchange with auth server:', err);

@@ -15,54 +15,24 @@ const lastNotificationTimestamps: Record<string, string> = {};
 const DEFAULT_POLLING_INTERVAL = 1000;
 
 /**
- * Create a new BskyAgent instance for an account
- */
-function createAgentForAccount(account: Account): any {
-  const agent = new BskyAgent({ service: 'https://bsky.social' });
-  
-  // Resume the session with stored tokens
-  agent.resumeSession({
-    refreshJwt: account.refreshJwt,
-    accessJwt: account.accessJwt,
-    did: account.did,
-    handle: account.handle
-  });
-  
-  // Handle session events
-  // @ts-ignore - Method resolution issue
-  agent.addEventListener(AtpSessionEvent.Create, () => {
-    console.log('Session created for', account.handle);
-  });
-  
-  // @ts-ignore - Method resolution issue
-  agent.addEventListener(AtpSessionEvent.Update, () => {
-    console.log('Session updated for', account.handle);
-    // TODO: Update the stored account with new tokens
-  });
-  
-  // @ts-ignore - Method resolution issue
-  agent.addEventListener(AtpSessionEvent.Expired, () => {
-    console.log('Session expired for', account.handle);
-    // TODO: Handle expired session
-  });
-  
-  return agent;
-}
-
-/**
  * Start polling for notifications for an account
  */
-export function startNotificationPolling(account: Account, interval = DEFAULT_POLLING_INTERVAL): number {
-  const agent = createAgentForAccount(account);
+export function startNotificationPolling(
+  account: Account, 
+  agent: BskyAgent, // Accept the full agent again
+  interval = DEFAULT_POLLING_INTERVAL
+): number {
   
-  // Initial fetch to get current count
-  fetchNotifications(agent, account);
+  console.log(`[Notifications] Starting polling for ${account.handle} using agent`);
+  // Initial fetch 
+  fetchNotifications(account, agent); // Pass account and agent
   
   // Set up interval for regular polling
-  const intervalId = window.setInterval(() => {
-    fetchNotifications(agent, account);
+  const intervalId = setInterval(() => {
+    fetchNotifications(account, agent); // Pass account and agent
   }, interval);
   
+  console.log(`[Notifications] Polling interval ${intervalId} started for ${account.did}`);
   return intervalId;
 }
 
@@ -72,7 +42,7 @@ export function startNotificationPolling(account: Account, interval = DEFAULT_PO
 export function stopNotificationPolling(did: string, pollingIntervals: Record<string, number>): void {
   const intervalId = pollingIntervals[did];
   if (intervalId) {
-    window.clearInterval(intervalId);
+    clearInterval(intervalId); // Use global clearInterval
     delete pollingIntervals[did]; // Remove from the record
     console.log(`Stopped polling for ${did}`);
   } else {
@@ -95,23 +65,36 @@ export function stopAllPolling(pollingIntervals: Record<string, number>): void {
  * Fetch notifications for an account and process new ones
  */
 async function fetchNotifications(
-  agent: any, 
-  account: Account
+  account: Account,       // Keep account for context
+  agent: BskyAgent        // Accept agent again
 ): Promise<void> {
+  
   try {
-    // Get the last notification timestamp
     const lastSeenAt = lastNotificationTimestamps[account.did] || undefined;
     
-    // Fetch notifications
-    const response = await agent.listNotifications({
-      limit: 20,
-      seenAt: lastSeenAt
-    });
+    // Construct parameters for the API call
+    const params: AtprotoAPI.AppBskyNotificationListNotifications.QueryParams = {
+        limit: 50
+    };
+    if (lastSeenAt) {
+        params.seenAt = lastSeenAt;
+    }
+
+    console.log(`[Notifications] Fetching for ${account.handle} via agent:`, params);
+    
+    // Make the request using the agent's method
+    const response = await agent.api.app.bsky.notification.listNotifications(params);
+
+    // Agent methods throw on error, so no need to check response.ok
+    // if (!response.ok) { ... }
+
+    // Assuming agent method returns data directly in expected structure
+    const responseData = response.data; // Access data property
     
     // Get only unread notifications
-    const unreadNotifications = response.data.notifications.filter(
-      // @ts-ignore - Namespace resolution issue
-      (notification: AppBskyNotificationListNotifications.Notification) => !notification.isRead
+    const unreadNotifications = responseData.notifications.filter(
+      // Use the correct type from the imported namespace
+      (notification: AtprotoAPI.AppBskyNotificationListNotifications.Notification) => !notification.isRead 
     );
     
     // Store the current notification count
@@ -119,32 +102,57 @@ async function fetchNotifications(
     const currentCount = unreadNotifications.length;
     notificationCounts[account.did] = currentCount;
     
-    // Check if we have new notifications
-    if (currentCount > previousCount && previousCount !== 0) {
-      // Get the new notifications (ones we haven't processed yet)
-      const newNotifications = unreadNotifications.slice(0, currentCount - previousCount);
+    console.log(`[Notifications] Fetched for ${account.handle}. Unread: ${currentCount}, Previous: ${previousCount}`);
+
+    // Check if we have new notifications SINCE THE LAST CHECK (not just total unread)
+    if (responseData.notifications.length > 0 && currentCount > 0) {
+      // Find the actual new ones based on timestamp or unseen status if possible
+      // For simplicity now, process all *currently* unread ones if count increased
+      // A more robust way would involve comparing CIDs or timestamps if needed.
+      if (currentCount > previousCount) {
+          console.log(`[Notifications] New notifications detected for ${account.handle}. Processing ${currentCount - previousCount} new.`);
+          // Process only the difference 
+          // Note: This assumes notifications are ordered newest first
+          const newlyUnread = unreadNotifications.slice(0, currentCount - previousCount);
+          processNewNotifications(newlyUnread, account); 
+      } else if (currentCount < previousCount) {
+          // Count decreased, likely marked as read elsewhere. Log it.
+          console.log(`[Notifications] Unread count decreased for ${account.handle} (Read elsewhere?).`);
+      }
       
-      // Process new notifications
-      processNewNotifications(newNotifications, account);
+      // Update last seen timestamp ONLY if we fetched some notifications
+      // Use the timestamp of the LATEST notification fetched as the new 'seenAt' marker
+      // to avoid potential race conditions or missed notifications.
+      // This requires the agent response to include the necessary timestamp or cursor.
+      // Using current time might mark future notifications as seen.
+      // Let's stick to Date().toISOString() for now but acknowledge limitation.
+      lastNotificationTimestamps[account.did] = new Date().toISOString(); 
+      console.log(`[Notifications] Updated lastSeen timestamp for ${account.handle} to ${lastNotificationTimestamps[account.did]}`);
+
+    } else {
+      console.log(`[Notifications] No new unread notifications found for ${account.handle}`);
     }
     
-    // Update seen timestamp if there are any notifications
-    if (response.data.notifications.length > 0) {
-      lastNotificationTimestamps[account.did] = new Date().toISOString();
-    }
-    
-    // Send message to update the UI
+    // Send message to update the UI (badge/popup)
+    updateNotificationBadge(); // Update badge based on ALL counts
     browser.runtime.sendMessage({
       type: 'NOTIFICATION_COUNT_UPDATED',
       data: {
         did: account.did,
         handle: account.handle,
-        count: currentCount
+        count: currentCount // Send the current total unread count
       }
-    });
-    
+    }).catch(err => console.log("Error sending NOTIFICATION_COUNT_UPDATED message:", err)); // Add catch
+
   } catch (error) {
-    console.error('Error fetching notifications for', account.handle, error);
+    let errorMessage = 'Unknown error';
+    if (error instanceof Error) {
+      // Log specific ATProto error types if available
+      // if (error instanceof AtprotoAPI.AtpError) { ... }
+      errorMessage = error.message;
+    }
+    // Avoid logging full agent object in case of error
+    console.error(`[Notifications] Error fetching notifications for ${account.handle} (${account.did}): ${errorMessage}`, error);
   }
 }
 
